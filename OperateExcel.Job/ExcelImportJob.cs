@@ -43,6 +43,10 @@ public sealed class ExcelImportJob
         "\\[\\$([^\\]-]+)-[^\\]]+\\]",
         RegexOptions.Compiled);
 
+    private static readonly Regex ChineseMonthDateRegex = new(
+        @"^(?<month>\d{1,2})\u6708\s+(?<day>\d{1,2}),?\s+(?<year>\d{4})$",
+        RegexOptions.Compiled);
+
     private readonly ExcelImportOptions _options;
     private readonly ILogger<ExcelImportJob> _logger;
 
@@ -74,6 +78,11 @@ public sealed class ExcelImportJob
             throw new FileNotFoundException("Template file not found.", _options.TemplateFilePath);
         }
 
+        Directory.CreateDirectory(_options.OutputDirectory);
+        var outputFilePath = Path.Combine(_options.OutputDirectory, BuildReportFileName(processingDate));
+        File.Copy(_options.TemplateFilePath, outputFilePath, overwrite: true);
+        RemoveReadOnlyAttribute(outputFilePath);
+
         var storeDirectories = Directory.GetDirectories(sourceDirectory);
         if (storeDirectories.Length == 0)
         {
@@ -81,7 +90,7 @@ public sealed class ExcelImportJob
         }
 
         IWorkbook workbook;
-        using (var templateStream = File.Open(_options.TemplateFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var templateStream = File.Open(outputFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             workbook = WorkbookFactory.Create(templateStream);
         }
@@ -107,14 +116,11 @@ public sealed class ExcelImportJob
                 continue;
             }
 
-            if (_options.ClearExistingData)
-            {
-                ClearRowsBelow(targetSheet, targetHeaderRowIndex);
-            }
-
             var targetHeaders = ReadRow(targetSheet.GetRow(targetHeaderRowIndex), formatter)
                 .Select(DelimitedTableReader.CleanHeader)
                 .ToList();
+
+            var nextTargetRowIndex = targetHeaderRowIndex + 1;
 
             foreach (var storeDirectory in OrderStoreDirectories(storeDirectories))
             {
@@ -147,6 +153,11 @@ public sealed class ExcelImportJob
                     .Where(column => column.Header.Length > 0 && column.SourceColumnIndex >= 0)
                     .ToList();
 
+                if (_options.ClearExistingData && nextTargetRowIndex == targetHeaderRowIndex + 1)
+                {
+                    ClearWritableCells(targetSheet, targetHeaderRowIndex, writableColumns.Select(column => column.TargetColumnIndex));
+                }
+
                 if (writableColumns.Count == 0)
                 {
                     messages.Add($"Skipped {sourceFile}: no matching columns for sheet {sheetName}.");
@@ -155,7 +166,7 @@ public sealed class ExcelImportJob
 
                 foreach (var sourceRow in sourceTable.Rows)
                 {
-                    var targetRow = targetSheet.CreateRow(targetSheet.LastRowNum + 1);
+                    var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
                     foreach (var column in writableColumns)
                     {
                         var value = column.SourceColumnIndex < sourceRow.Count
@@ -166,6 +177,7 @@ public sealed class ExcelImportJob
                     }
 
                     importedCounts[sheetName]++;
+                    nextTargetRowIndex++;
                 }
 
                 messages.Add($"Imported {sourceTable.Rows.Count} rows from {sourceFile} to sheet {sheetName}.");
@@ -173,8 +185,8 @@ public sealed class ExcelImportJob
         }
 
         var tempOutput = Path.Combine(
-            Path.GetDirectoryName(_options.TemplateFilePath)!,
-            $"{Path.GetFileNameWithoutExtension(_options.TemplateFilePath)}.{DateTime.Now:yyyyMMddHHmmss}.tmp.xlsx");
+            _options.OutputDirectory,
+            $"{Path.GetFileNameWithoutExtension(outputFilePath)}.{DateTime.Now:yyyyMMddHHmmss}.tmp.xlsx");
 
         using (var outputStream = File.Create(tempOutput))
         {
@@ -182,13 +194,13 @@ public sealed class ExcelImportJob
         }
 
         workbook.Close();
-        RemoveReadOnlyAttribute(_options.TemplateFilePath);
-        File.Move(tempOutput, _options.TemplateFilePath, overwrite: true);
+        RemoveReadOnlyAttribute(outputFilePath);
+        File.Move(tempOutput, outputFilePath, overwrite: true);
 
         var result = new ImportResult(
             processingDate,
             sourceDirectory,
-            _options.TemplateFilePath,
+            outputFilePath,
             importedCounts["fulfillment"],
             importedCounts["payments"],
             importedCounts[AdvertisingSheetName],
@@ -212,6 +224,11 @@ public sealed class ExcelImportJob
         }
 
         return DateOnly.FromDateTime(DateTime.Today.AddDays(_options.DateOffsetDays));
+    }
+
+    private static string BuildReportFileName(DateOnly processingDate)
+    {
+        return $"{processingDate.Year}.{processingDate.Month}\u6708\u65e5\u62a5{processingDate.Day}\u65e5.xlsx";
     }
 
     private static IEnumerable<string> OrderStoreDirectories(IEnumerable<string> storeDirectories)
@@ -321,6 +338,13 @@ public sealed class ExcelImportJob
 
     private static void SetCellValue(ICell cell, string value, CellStyleCache styleCache)
     {
+        if (TryParseDateCell(value, out var dateValue))
+        {
+            cell.SetCellValue(dateValue);
+            cell.CellStyle = styleCache.Get("date");
+            return;
+        }
+
         if (TryParseNumericCell(value, out var parsed))
         {
             cell.SetCellValue(parsed.Value);
@@ -333,6 +357,28 @@ public sealed class ExcelImportJob
         }
 
         cell.SetCellValue(value);
+    }
+
+    private static bool TryParseDateCell(string value, out DateTime dateValue)
+    {
+        dateValue = default;
+        var text = value.Trim();
+        var match = ChineseMonthDateRegex.Match(text);
+        if (match.Success
+            && int.TryParse(match.Groups["year"].Value, out var year)
+            && int.TryParse(match.Groups["month"].Value, out var month)
+            && int.TryParse(match.Groups["day"].Value, out var day))
+        {
+            dateValue = new DateTime(year, month, day);
+            return true;
+        }
+
+        return DateTime.TryParseExact(
+            text,
+            ["MMM d yyyy", "MMMM d yyyy", "M/d/yyyy", "yyyy-MM-dd"],
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out dateValue);
     }
 
     private static bool TryParseNumericCell(string value, out ParsedNumericCell parsed)
@@ -404,14 +450,24 @@ public sealed class ExcelImportJob
         return ExcelCurrencyFormatRegex.Replace(text, match => match.Groups[1].Value);
     }
 
-    private static void ClearRowsBelow(ISheet sheet, int headerRowIndex)
+    private static void ClearWritableCells(ISheet sheet, int headerRowIndex, IEnumerable<int> writableColumnIndexes)
     {
-        for (var rowIndex = sheet.LastRowNum; rowIndex > headerRowIndex; rowIndex--)
+        var columns = writableColumnIndexes.Distinct().ToList();
+        for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
         {
             var row = sheet.GetRow(rowIndex);
-            if (row is not null)
+            if (row is null)
             {
-                sheet.RemoveRow(row);
+                continue;
+            }
+
+            foreach (var columnIndex in columns)
+            {
+                var cell = row.GetCell(columnIndex);
+                if (cell is not null)
+                {
+                    row.RemoveCell(cell);
+                }
             }
         }
     }
@@ -457,6 +513,11 @@ public sealed class ExcelImportJob
             if (string.Equals(key, "percent", StringComparison.OrdinalIgnoreCase))
             {
                 return "0.00%";
+            }
+
+            if (string.Equals(key, "date", StringComparison.OrdinalIgnoreCase))
+            {
+                return "m/d/yyyy";
             }
 
             if (key.StartsWith("currency:", StringComparison.OrdinalIgnoreCase))

@@ -17,6 +17,10 @@ builder.Services.PostConfigure<ExcelImportOptions>(options =>
         {
             options.TemplateFilePath = arg["--template=".Length..];
         }
+        else if (arg.StartsWith("--output-dir=", StringComparison.OrdinalIgnoreCase))
+        {
+            options.OutputDirectory = arg["--output-dir=".Length..];
+        }
     }
 });
 builder.Services.AddSingleton<ExcelImportJob>();
