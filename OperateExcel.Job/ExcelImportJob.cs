@@ -1,17 +1,47 @@
 using Microsoft.Extensions.Options;
 using NPOI.SS.UserModel;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace OperateExcel.Job;
 
 public sealed class ExcelImportJob
 {
+    private const string AdvertisingSheetName = "\u5e7f\u544a";
+
     private static readonly IReadOnlyDictionary<string, string> SheetSourceExtensions =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["fulfillment"] = ".txt",
             ["payments"] = ".csv",
-            ["广告"] = ".xlsx"
+            [AdvertisingSheetName] = ".xlsx"
         };
+
+    private static readonly IReadOnlyList<string> StoreReadOrder =
+    [
+        "\u65e0\u5fe7\u65e0\u8651",
+        "Oyumoents",
+        "Yue an Company",
+        "DUX"
+    ];
+
+    private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> SheetHeaderAliases =
+        new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [AdvertisingSheetName] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["\u70b9\u51fb\u7387(CTR)"] = "\u70b9\u51fb\u7387 (CTR)",
+                ["\u6bcf\u6b21\u70b9\u51fb\u6210\u672c(CPC)"] = "\u5355\u6b21\u70b9\u51fb\u6210\u672c (CPC)"
+            }
+        };
+
+    private static readonly Regex CurrencyTokenRegex = new(
+        "(?i)(US\\$|USD|CNY|RMB|EUR|GBP|[$\u20ac\u00a3\u00a5\uffe5])",
+        RegexOptions.Compiled);
+
+    private static readonly Regex ExcelCurrencyFormatRegex = new(
+        "\\[\\$([^\\]-]+)-[^\\]]+\\]",
+        RegexOptions.Compiled);
 
     private readonly ExcelImportOptions _options;
     private readonly ILogger<ExcelImportJob> _logger;
@@ -56,12 +86,13 @@ public sealed class ExcelImportJob
             workbook = WorkbookFactory.Create(templateStream);
         }
         var formatter = new DataFormatter();
+        var cellStyleCache = new CellStyleCache(workbook);
 
         var importedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             ["fulfillment"] = 0,
             ["payments"] = 0,
-            ["广告"] = 0
+            [AdvertisingSheetName] = 0
         };
 
         foreach (var (sheetName, extension) in SheetSourceExtensions)
@@ -85,7 +116,7 @@ public sealed class ExcelImportJob
                 .Select(DelimitedTableReader.CleanHeader)
                 .ToList();
 
-            foreach (var storeDirectory in storeDirectories.OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
+            foreach (var storeDirectory in OrderStoreDirectories(storeDirectories))
             {
                 var sourceFile = Directory.GetFiles(storeDirectory, $"*{extension}", SearchOption.TopDirectoryOnly)
                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
@@ -109,7 +140,7 @@ public sealed class ExcelImportJob
                     {
                         Header = header,
                         TargetColumnIndex = columnIndex,
-                        SourceColumnIndex = sourceIndex.TryGetValue(header, out var sourceColumnIndex)
+                        SourceColumnIndex = sourceIndex.TryGetValue(ResolveSourceHeader(sheetName, header), out var sourceColumnIndex)
                             ? sourceColumnIndex
                             : -1
                     })
@@ -131,7 +162,7 @@ public sealed class ExcelImportJob
                             ? sourceRow[column.SourceColumnIndex]
                             : string.Empty;
 
-                        targetRow.CreateCell(column.TargetColumnIndex, CellType.String).SetCellValue(value);
+                        SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
                     }
 
                     importedCounts[sheetName]++;
@@ -160,7 +191,7 @@ public sealed class ExcelImportJob
             _options.TemplateFilePath,
             importedCounts["fulfillment"],
             importedCounts["payments"],
-            importedCounts["广告"],
+            importedCounts[AdvertisingSheetName],
             messages);
 
         _logger.LogInformation(
@@ -181,6 +212,25 @@ public sealed class ExcelImportJob
         }
 
         return DateOnly.FromDateTime(DateTime.Today.AddDays(_options.DateOffsetDays));
+    }
+
+    private static IEnumerable<string> OrderStoreDirectories(IEnumerable<string> storeDirectories)
+    {
+        var order = StoreReadOrder
+            .Select((storeName, index) => new { storeName, index })
+            .ToDictionary(item => item.storeName, item => item.index, StringComparer.OrdinalIgnoreCase);
+
+        return storeDirectories
+            .OrderBy(path => order.TryGetValue(Path.GetFileName(path), out var index) ? index : int.MaxValue)
+            .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveSourceHeader(string sheetName, string targetHeader)
+    {
+        return SheetHeaderAliases.TryGetValue(sheetName, out var aliases)
+            && aliases.TryGetValue(targetHeader, out var sourceHeader)
+                ? sourceHeader
+                : targetHeader;
     }
 
     private static TableData ReadExcelTable(string path, DataFormatter formatter)
@@ -269,6 +319,91 @@ public sealed class ExcelImportJob
         return index;
     }
 
+    private static void SetCellValue(ICell cell, string value, CellStyleCache styleCache)
+    {
+        if (TryParseNumericCell(value, out var parsed))
+        {
+            cell.SetCellValue(parsed.Value);
+            if (parsed.FormatKey is not null)
+            {
+                cell.CellStyle = styleCache.Get(parsed.FormatKey);
+            }
+
+            return;
+        }
+
+        cell.SetCellValue(value);
+    }
+
+    private static bool TryParseNumericCell(string value, out ParsedNumericCell parsed)
+    {
+        parsed = default;
+        var text = value.Trim();
+        if (text.Length == 0)
+        {
+            return false;
+        }
+
+        text = NormalizeExcelCurrencyFormat(text);
+
+        var isPercent = text.EndsWith('%');
+        var currencySymbol = ResolveCurrencySymbol(text);
+        var numberText = CurrencyTokenRegex.Replace(text, string.Empty)
+            .Replace("%", string.Empty)
+            .Trim();
+
+        var isParenthesizedNegative = numberText.StartsWith('(') && numberText.EndsWith(')');
+        if (isParenthesizedNegative)
+        {
+            numberText = "-" + numberText[1..^1];
+        }
+
+        numberText = numberText.Replace(",", string.Empty);
+        if (numberText.Length > 1 && numberText[0] == '0' && char.IsDigit(numberText[1]))
+        {
+            return false;
+        }
+
+        if (!double.TryParse(numberText, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var number))
+        {
+            return false;
+        }
+
+        var formatKey = currencySymbol is not null
+            ? $"currency:{currencySymbol}"
+            : isPercent
+                ? "percent"
+                : null;
+
+        parsed = new ParsedNumericCell(isPercent ? number / 100D : number, formatKey);
+        return true;
+    }
+
+    private static string? ResolveCurrencySymbol(string text)
+    {
+        text = NormalizeExcelCurrencyFormat(text);
+
+        var match = CurrencyTokenRegex.Match(text);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        return match.Value.ToUpperInvariant() switch
+        {
+            "USD" or "US$" or "$" => "$",
+            "CNY" or "RMB" or "\u00a5" or "\uffe5" => "\u00a5",
+            "EUR" or "\u20ac" => "\u20ac",
+            "GBP" or "\u00a3" => "\u00a3",
+            _ => match.Value
+        };
+    }
+
+    private static string NormalizeExcelCurrencyFormat(string text)
+    {
+        return ExcelCurrencyFormatRegex.Replace(text, match => match.Groups[1].Value);
+    }
+
     private static void ClearRowsBelow(ISheet sheet, int headerRowIndex)
     {
         for (var rowIndex = sheet.LastRowNum; rowIndex > headerRowIndex; rowIndex--)
@@ -287,6 +422,50 @@ public sealed class ExcelImportJob
         if ((attributes & FileAttributes.ReadOnly) == FileAttributes.ReadOnly)
         {
             File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
+        }
+    }
+
+    private readonly record struct ParsedNumericCell(double Value, string? FormatKey);
+
+    private sealed class CellStyleCache
+    {
+        private readonly IWorkbook _workbook;
+        private readonly IDataFormat _dataFormat;
+        private readonly Dictionary<string, ICellStyle> _styles = new(StringComparer.OrdinalIgnoreCase);
+
+        public CellStyleCache(IWorkbook workbook)
+        {
+            _workbook = workbook;
+            _dataFormat = workbook.CreateDataFormat();
+        }
+
+        public ICellStyle Get(string key)
+        {
+            if (_styles.TryGetValue(key, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            style.DataFormat = _dataFormat.GetFormat(ResolveFormat(key));
+            _styles.Add(key, style);
+            return style;
+        }
+
+        private static string ResolveFormat(string key)
+        {
+            if (string.Equals(key, "percent", StringComparison.OrdinalIgnoreCase))
+            {
+                return "0.00%";
+            }
+
+            if (key.StartsWith("currency:", StringComparison.OrdinalIgnoreCase))
+            {
+                var symbol = key["currency:".Length..];
+                return $"{symbol}#,##0.00";
+            }
+
+            return "General";
         }
     }
 }
