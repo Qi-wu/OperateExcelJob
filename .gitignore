@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.tmp
+*.tmp.xlsx
+*.verify.xlsx
+*.log
+
