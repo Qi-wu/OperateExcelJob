@@ -1,20 +1,44 @@
 using Microsoft.Extensions.Options;
 using NPOI.SS.UserModel;
+using NPOI.XSSF.UserModel;
 using System.Globalization;
+using System.IO.Compression;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace OperateExcel.Job;
 
 public sealed class ExcelImportJob
 {
     private const string AdvertisingSheetName = "\u5e7f\u544a";
+    private const string FulfillmentSheetName = "fulfillment";
+    private const string PaymentsSheetName = "payments";
+    private const string FulfillmentTemplateSheetName = "\u6a21\u7248F";
+    private const string PaymentTemplateSheetName = "\u6a21\u677fP";
+    private const string WaitingOrderFileName = "\u7b49\u5f85\u4e2d\u7684\u8ba2\u5355\u53f7.xlsx";
+    private const string AmazonOrderIdHeader = "amazon-order-id";
+    private const string OrderStatusHeader = "order-status";
+    private const int FulfillmentCopyStartColumnIndex = 11; // Excel column L.
+    private const int FulfillmentCopyEndColumnIndex = 19; // Excel column T.
 
     private static readonly IReadOnlyDictionary<string, string> SheetSourceExtensions =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["fulfillment"] = ".txt",
-            ["payments"] = ".csv",
+            [FulfillmentSheetName] = ".txt",
+            [PaymentsSheetName] = ".csv",
             [AdvertisingSheetName] = ".xlsx"
+        };
+
+    private static readonly IReadOnlyDictionary<string, string> PaymentTemplateColumnMap =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["sku"] = "sku",
+            ["quantity"] = "quantity",
+            ["product sales"] = "item-price",
+            ["product sales tax"] = "item-tax",
+            ["shipping credits"] = "shipping-price",
+            ["gift wrap credits"] = "gift wrap credits",
+            ["total"] = "total"
         };
 
     private static readonly IReadOnlyList<string> StoreReadOrder =
@@ -47,6 +71,10 @@ public sealed class ExcelImportJob
         @"^(?<month>\d{1,2})\u6708\s+(?<day>\d{1,2}),?\s+(?<year>\d{4})$",
         RegexOptions.Compiled);
 
+    private static readonly Regex CellReferenceRegex = new(
+        @"(?<![A-Za-z0-9_])(?<column>\$?[A-Za-z]{1,3})(?<absoluteRow>\$?)(?<row>\d+)(?![A-Za-z0-9_])",
+        RegexOptions.Compiled);
+
     private readonly ExcelImportOptions _options;
     private readonly ILogger<ExcelImportJob> _logger;
 
@@ -66,7 +94,7 @@ public sealed class ExcelImportJob
         var messages = new List<string>();
         var processingDate = ResolveProcessingDate();
         var dateFolderName = processingDate.ToString("yyyy-MM-dd");
-        var sourceDirectory = Path.Combine(_options.RootDirectory, dateFolderName, dateFolderName);
+        var sourceDirectory = Path.Combine(_options.RootDirectory, dateFolderName);
 
         if (!Directory.Exists(sourceDirectory))
         {
@@ -99,8 +127,8 @@ public sealed class ExcelImportJob
 
         var importedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
-            ["fulfillment"] = 0,
-            ["payments"] = 0,
+            [FulfillmentSheetName] = 0,
+            [PaymentsSheetName] = 0,
             [AdvertisingSheetName] = 0
         };
 
@@ -184,6 +212,8 @@ public sealed class ExcelImportJob
             }
         }
 
+        ApplyPostImportRules(workbook, processingDate, formatter, cellStyleCache, messages);
+
         var tempOutput = Path.Combine(
             _options.OutputDirectory,
             $"{Path.GetFileNameWithoutExtension(outputFilePath)}.{DateTime.Now:yyyyMMddHHmmss}.tmp.xlsx");
@@ -193,6 +223,7 @@ public sealed class ExcelImportJob
             workbook.Write(outputStream);
         }
 
+        RemoveStaleCalculationMetadata(tempOutput);
         workbook.Close();
         RemoveReadOnlyAttribute(outputFilePath);
         File.Move(tempOutput, outputFilePath, overwrite: true);
@@ -201,8 +232,8 @@ public sealed class ExcelImportJob
             processingDate,
             sourceDirectory,
             outputFilePath,
-            importedCounts["fulfillment"],
-            importedCounts["payments"],
+            importedCounts[FulfillmentSheetName],
+            importedCounts[PaymentsSheetName],
             importedCounts[AdvertisingSheetName],
             messages);
 
@@ -213,6 +244,252 @@ public sealed class ExcelImportJob
             result.AdvertisingRows);
 
         return result;
+    }
+
+    private void ApplyPostImportRules(
+        IWorkbook workbook,
+        DateOnly processingDate,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache,
+        ICollection<string> messages)
+    {
+        var waitingOrderIds = ReadWaitingOrderIds(processingDate, formatter);
+        var highlightedOrderIds = HighlightWaitingFulfillmentOrders(workbook, waitingOrderIds, formatter, cellStyleCache);
+
+        var copiedFulfillmentRows = CopyFilteredFulfillmentRowsToTemplate(workbook, formatter, cellStyleCache);
+        var copiedPaymentRows = CopyOrderPaymentRowsToTemplate(workbook, formatter, cellStyleCache);
+        MarkWorkbookForFormulaRecalculation(workbook);
+
+        messages.Add($"Highlighted {highlightedOrderIds} fulfillment rows from {WaitingOrderFileName}.");
+        messages.Add($"Copied {copiedFulfillmentRows} fulfillment rows to sheet {FulfillmentTemplateSheetName}.");
+        messages.Add($"Copied {copiedPaymentRows} payment rows to sheet {PaymentTemplateSheetName}.");
+    }
+
+    private HashSet<string> ReadWaitingOrderIds(DateOnly processingDate, DataFormatter formatter)
+    {
+        var waitingOrderPath = Path.Combine(
+            _options.RootDirectory,
+            processingDate.ToString("yyyy-MM-dd"),
+            WaitingOrderFileName);
+
+        if (!File.Exists(waitingOrderPath))
+        {
+            _logger.LogWarning("Waiting order file not found: {WaitingOrderPath}", waitingOrderPath);
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        using var stream = File.Open(waitingOrderPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var workbook = WorkbookFactory.Create(stream);
+        try
+        {
+            var sheet = workbook.GetSheetAt(0);
+            var headerRowIndex = FindHeaderRow(sheet, formatter);
+            if (headerRowIndex < 0)
+            {
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            var headers = ReadRow(sheet.GetRow(headerRowIndex), formatter)
+                .Select(DelimitedTableReader.CleanHeader)
+                .ToList();
+            var headerIndex = BuildHeaderIndex(headers);
+            var orderColumnIndex = ResolveWaitingOrderColumnIndex(headerIndex);
+            if (orderColumnIndex < 0)
+            {
+                orderColumnIndex = headers.Count > 1 ? 1 : 0;
+            }
+
+            var orderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
+            {
+                var row = sheet.GetRow(rowIndex);
+                if (row is null)
+                {
+                    continue;
+                }
+
+                var orderId = NormalizeOrderId(formatter.FormatCellValue(row.GetCell(orderColumnIndex)));
+                if (orderId.Length > 0)
+                {
+                    orderIds.Add(orderId);
+                }
+            }
+
+            return orderIds;
+        }
+        finally
+        {
+            workbook.Close();
+        }
+    }
+
+    private static int HighlightWaitingFulfillmentOrders(
+        IWorkbook workbook,
+        ISet<string> waitingOrderIds,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
+    {
+        if (waitingOrderIds.Count == 0)
+        {
+            return 0;
+        }
+
+        var sheet = workbook.GetSheet(FulfillmentSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentSheetName}");
+        var headerRowIndex = FindHeaderRow(sheet, formatter);
+        var headerIndex = ReadHeaderIndex(sheet, headerRowIndex, formatter);
+        var orderColumnIndex = ResolveRequiredColumn(headerIndex, AmazonOrderIdHeader, FulfillmentSheetName);
+
+        var highlightedRows = 0;
+        for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var orderCell = row.GetCell(orderColumnIndex);
+            var orderId = NormalizeOrderId(formatter.FormatCellValue(orderCell));
+            if (orderId.Length == 0 || !waitingOrderIds.Contains(orderId))
+            {
+                continue;
+            }
+
+            orderCell ??= row.CreateCell(orderColumnIndex);
+            orderCell.CellStyle = cellStyleCache.GetRedFontStyle(orderCell.CellStyle);
+            highlightedRows++;
+        }
+
+        return highlightedRows;
+    }
+
+    private static int CopyFilteredFulfillmentRowsToTemplate(
+        IWorkbook workbook,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
+    {
+        var sourceSheet = workbook.GetSheet(FulfillmentSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentSheetName}");
+        var targetSheet = workbook.GetSheet(FulfillmentTemplateSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentTemplateSheetName}");
+
+        var sourceHeaderRowIndex = FindHeaderRow(sourceSheet, formatter);
+        var targetHeaderRowIndex = FindHeaderRow(targetSheet, formatter);
+        var sourceHeaders = ReadHeaders(sourceSheet, sourceHeaderRowIndex, formatter);
+        var targetHeaderIndex = ReadHeaderIndex(targetSheet, targetHeaderRowIndex, formatter, preferLastDuplicate: true);
+        var sourceHeaderIndex = BuildHeaderIndex(sourceHeaders);
+        var orderColumnIndex = ResolveRequiredColumn(sourceHeaderIndex, AmazonOrderIdHeader, FulfillmentSheetName);
+        var statusColumnIndex = ResolveRequiredColumn(sourceHeaderIndex, OrderStatusHeader, FulfillmentSheetName);
+
+        var copyColumns = Enumerable.Range(
+                FulfillmentCopyStartColumnIndex,
+                FulfillmentCopyEndColumnIndex - FulfillmentCopyStartColumnIndex + 1)
+            .Where(sourceColumnIndex => sourceColumnIndex < sourceHeaders.Count)
+            .Select(sourceColumnIndex => new CopyColumn(
+                sourceColumnIndex,
+                targetHeaderIndex.TryGetValue(sourceHeaders[sourceColumnIndex], out var targetColumnIndex)
+                    ? targetColumnIndex
+                    : -1,
+                sourceHeaders[sourceColumnIndex]))
+            .Where(column => column.TargetColumnIndex >= 0 && column.Header.Length > 0)
+            .ToList();
+
+        ClearWritableCells(targetSheet, targetHeaderRowIndex, copyColumns.Select(column => column.TargetColumnIndex));
+
+        var formulaTemplateRow = targetSheet.GetRow(targetHeaderRowIndex + 1);
+        var dataColumnIndexes = copyColumns.Select(column => column.TargetColumnIndex).ToHashSet();
+        var nextTargetRowIndex = targetHeaderRowIndex + 1;
+        for (var rowIndex = sourceHeaderRowIndex + 1; rowIndex <= sourceSheet.LastRowNum; rowIndex++)
+        {
+            var sourceRow = sourceSheet.GetRow(rowIndex);
+            if (sourceRow is null)
+            {
+                continue;
+            }
+
+            var orderCell = sourceRow.GetCell(orderColumnIndex);
+            var orderStatus = formatter.FormatCellValue(sourceRow.GetCell(statusColumnIndex));
+            if (IsCellFontRed(workbook, orderCell)
+                || orderStatus.Contains("cancelled", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
+            CopyFormulaTemplateCells(formulaTemplateRow, targetRow, dataColumnIndexes);
+            foreach (var column in copyColumns)
+            {
+                CopyFormattedCellValue(
+                    sourceRow.GetCell(column.SourceColumnIndex),
+                    targetRow.CreateCell(column.TargetColumnIndex),
+                    formatter,
+                    cellStyleCache);
+            }
+
+            nextTargetRowIndex++;
+        }
+
+        return nextTargetRowIndex - targetHeaderRowIndex - 1;
+    }
+
+    private static int CopyOrderPaymentRowsToTemplate(
+        IWorkbook workbook,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
+    {
+        var sourceSheet = workbook.GetSheet(PaymentsSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {PaymentsSheetName}");
+        var targetSheet = workbook.GetSheet(PaymentTemplateSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {PaymentTemplateSheetName}");
+
+        var sourceHeaderRowIndex = FindHeaderRow(sourceSheet, formatter);
+        var targetHeaderRowIndex = FindHeaderRow(targetSheet, formatter);
+        var sourceHeaderIndex = ReadHeaderIndex(sourceSheet, sourceHeaderRowIndex, formatter);
+        var targetHeaderIndex = ReadHeaderIndex(targetSheet, targetHeaderRowIndex, formatter, preferLastDuplicate: true);
+        var typeColumnIndex = ResolveRequiredColumn(sourceHeaderIndex, "type", PaymentsSheetName);
+
+        var copyColumns = PaymentTemplateColumnMap
+            .Select(mapping => new CopyColumn(
+                ResolveRequiredColumn(sourceHeaderIndex, mapping.Key, PaymentsSheetName),
+                ResolveRequiredColumn(targetHeaderIndex, mapping.Value, PaymentTemplateSheetName),
+                mapping.Key))
+            .ToList();
+
+        ClearWritableCells(targetSheet, targetHeaderRowIndex, copyColumns.Select(column => column.TargetColumnIndex));
+
+        var formulaTemplateRow = targetSheet.GetRow(targetHeaderRowIndex + 1);
+        var dataColumnIndexes = copyColumns.Select(column => column.TargetColumnIndex).ToHashSet();
+        var nextTargetRowIndex = targetHeaderRowIndex + 1;
+        for (var rowIndex = sourceHeaderRowIndex + 1; rowIndex <= sourceSheet.LastRowNum; rowIndex++)
+        {
+            var sourceRow = sourceSheet.GetRow(rowIndex);
+            if (sourceRow is null)
+            {
+                continue;
+            }
+
+            var type = formatter.FormatCellValue(sourceRow.GetCell(typeColumnIndex));
+            if (!string.Equals(type.Trim(), "order", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
+            CopyFormulaTemplateCells(formulaTemplateRow, targetRow, dataColumnIndexes);
+            foreach (var column in copyColumns)
+            {
+                CopyFormattedCellValue(
+                    sourceRow.GetCell(column.SourceColumnIndex),
+                    targetRow.CreateCell(column.TargetColumnIndex),
+                    formatter,
+                    cellStyleCache);
+            }
+
+            nextTargetRowIndex++;
+        }
+
+        return nextTargetRowIndex - targetHeaderRowIndex - 1;
     }
 
     private DateOnly ResolveProcessingDate()
@@ -321,19 +598,159 @@ public sealed class ExcelImportJob
         return values;
     }
 
-    private static Dictionary<string, int> BuildHeaderIndex(IReadOnlyList<string> headers)
+    private static IReadOnlyList<string> ReadHeaders(ISheet sheet, int headerRowIndex, DataFormatter formatter)
+    {
+        if (headerRowIndex < 0)
+        {
+            throw new InvalidOperationException($"No header row found in sheet: {sheet.SheetName}");
+        }
+
+        return ReadRow(sheet.GetRow(headerRowIndex), formatter)
+            .Select(DelimitedTableReader.CleanHeader)
+            .ToList();
+    }
+
+    private static Dictionary<string, int> ReadHeaderIndex(
+        ISheet sheet,
+        int headerRowIndex,
+        DataFormatter formatter,
+        bool preferLastDuplicate = false)
+    {
+        return BuildHeaderIndex(ReadHeaders(sheet, headerRowIndex, formatter), preferLastDuplicate);
+    }
+
+    private static Dictionary<string, int> BuildHeaderIndex(IReadOnlyList<string> headers, bool preferLastDuplicate = false)
     {
         var index = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < headers.Count; i++)
         {
             var header = DelimitedTableReader.CleanHeader(headers[i]);
-            if (header.Length > 0 && !index.ContainsKey(header))
+            if (header.Length == 0)
+            {
+                continue;
+            }
+
+            if (preferLastDuplicate)
+            {
+                index[header] = i;
+            }
+            else if (!index.ContainsKey(header))
             {
                 index.Add(header, i);
             }
         }
 
         return index;
+    }
+
+    private static int ResolveRequiredColumn(
+        IReadOnlyDictionary<string, int> headerIndex,
+        string header,
+        string sheetName)
+    {
+        if (headerIndex.TryGetValue(header, out var columnIndex))
+        {
+            return columnIndex;
+        }
+
+        throw new InvalidOperationException($"Column '{header}' not found in sheet: {sheetName}");
+    }
+
+    private static int ResolveWaitingOrderColumnIndex(IReadOnlyDictionary<string, int> headerIndex)
+    {
+        foreach (var candidate in new[] { "\u8ba2\u5355\u53f7", AmazonOrderIdHeader, "order id", "order-id" })
+        {
+            if (headerIndex.TryGetValue(candidate, out var columnIndex))
+            {
+                return columnIndex;
+            }
+        }
+
+        return -1;
+    }
+
+    private static string NormalizeOrderId(string? value)
+    {
+        return (value ?? string.Empty).Trim().Trim('\'');
+    }
+
+    private static void CopyFormattedCellValue(
+        ICell? sourceCell,
+        ICell targetCell,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
+    {
+        if (sourceCell is null)
+        {
+            targetCell.SetCellValue(string.Empty);
+            return;
+        }
+
+        SetCellValue(targetCell, formatter.FormatCellValue(sourceCell), cellStyleCache);
+    }
+
+    private static void CopyFormulaTemplateCells(IRow? templateRow, IRow targetRow, ISet<int> dataColumnIndexes)
+    {
+        if (templateRow is null)
+        {
+            return;
+        }
+
+        var rowOffset = targetRow.RowNum - templateRow.RowNum;
+        foreach (var templateCell in templateRow.Cells)
+        {
+            if (templateCell.CellType != CellType.Formula || dataColumnIndexes.Contains(templateCell.ColumnIndex))
+            {
+                continue;
+            }
+
+            var targetCell = targetRow.GetCell(templateCell.ColumnIndex) ?? targetRow.CreateCell(templateCell.ColumnIndex);
+            targetCell.CellStyle = templateCell.CellStyle;
+            targetCell.SetCellFormula(AdjustFormulaRows(templateCell.CellFormula, rowOffset));
+        }
+    }
+
+    private static string AdjustFormulaRows(string formula, int rowOffset)
+    {
+        if (rowOffset == 0)
+        {
+            return formula;
+        }
+
+        return CellReferenceRegex.Replace(formula, match =>
+        {
+            if (match.Groups["absoluteRow"].Value == "$")
+            {
+                return match.Value;
+            }
+
+            var rowNumber = int.Parse(match.Groups["row"].Value, CultureInfo.InvariantCulture);
+            return $"{match.Groups["column"].Value}{rowNumber + rowOffset}";
+        });
+    }
+
+    private static bool IsCellFontRed(IWorkbook workbook, ICell? cell)
+    {
+        if (cell is null)
+        {
+            return false;
+        }
+
+        var font = workbook.GetFontAt(cell.CellStyle.FontIndex);
+        return font.Color == IndexedColors.Red.Index;
+    }
+
+    private static void MarkWorkbookForFormulaRecalculation(IWorkbook workbook)
+    {
+        for (var i = 0; i < workbook.NumberOfSheets; i++)
+        {
+            workbook.GetSheetAt(i).ForceFormulaRecalculation = true;
+        }
+
+        if (workbook is XSSFWorkbook xssfWorkbook)
+        {
+            xssfWorkbook.SetForceFormulaRecalculation(true);
+        }
     }
 
     private static void SetCellValue(ICell cell, string value, CellStyleCache styleCache)
@@ -481,13 +898,108 @@ public sealed class ExcelImportJob
         }
     }
 
+    private static void RemoveStaleCalculationMetadata(string xlsxPath)
+    {
+        using var archive = ZipFile.Open(xlsxPath, ZipArchiveMode.Update);
+        archive.GetEntry("xl/calcChain.xml")?.Delete();
+        RemoveWorkbookCalcChainRelationship(archive);
+        RemoveCalcChainContentType(archive);
+        MarkWorkbookXmlForFullRecalculation(archive);
+    }
+
+    private static void RemoveWorkbookCalcChainRelationship(ZipArchive archive)
+    {
+        const string relationshipsPath = "xl/_rels/workbook.xml.rels";
+        var entry = archive.GetEntry(relationshipsPath);
+        if (entry is null)
+        {
+            return;
+        }
+
+        var document = ReadXmlDocument(entry);
+        XNamespace ns = "http://schemas.openxmlformats.org/package/2006/relationships";
+        document.Root?
+            .Elements(ns + "Relationship")
+            .Where(element => string.Equals((string?)element.Attribute("Target"), "calcChain.xml", StringComparison.OrdinalIgnoreCase))
+            .Remove();
+
+        ReplaceXmlEntry(archive, relationshipsPath, document);
+    }
+
+    private static void RemoveCalcChainContentType(ZipArchive archive)
+    {
+        const string contentTypesPath = "[Content_Types].xml";
+        var entry = archive.GetEntry(contentTypesPath);
+        if (entry is null)
+        {
+            return;
+        }
+
+        var document = ReadXmlDocument(entry);
+        XNamespace ns = "http://schemas.openxmlformats.org/package/2006/content-types";
+        document.Root?
+            .Elements(ns + "Override")
+            .Where(element => string.Equals((string?)element.Attribute("PartName"), "/xl/calcChain.xml", StringComparison.OrdinalIgnoreCase))
+            .Remove();
+
+        ReplaceXmlEntry(archive, contentTypesPath, document);
+    }
+
+    private static void MarkWorkbookXmlForFullRecalculation(ZipArchive archive)
+    {
+        const string workbookPath = "xl/workbook.xml";
+        var entry = archive.GetEntry(workbookPath);
+        if (entry is null)
+        {
+            return;
+        }
+
+        var document = ReadXmlDocument(entry);
+        XNamespace ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        var root = document.Root;
+        if (root is null)
+        {
+            return;
+        }
+
+        var calcPr = root.Element(ns + "calcPr");
+        if (calcPr is null)
+        {
+            calcPr = new XElement(ns + "calcPr");
+            root.Add(calcPr);
+        }
+
+        calcPr.SetAttributeValue("calcMode", "auto");
+        calcPr.SetAttributeValue("fullCalcOnLoad", "1");
+        calcPr.SetAttributeValue("forceFullCalc", "1");
+
+        ReplaceXmlEntry(archive, workbookPath, document);
+    }
+
+    private static XDocument ReadXmlDocument(ZipArchiveEntry entry)
+    {
+        using var stream = entry.Open();
+        return XDocument.Load(stream, LoadOptions.PreserveWhitespace);
+    }
+
+    private static void ReplaceXmlEntry(ZipArchive archive, string path, XDocument document)
+    {
+        archive.GetEntry(path)?.Delete();
+        var replacement = archive.CreateEntry(path);
+        using var stream = replacement.Open();
+        document.Save(stream, SaveOptions.DisableFormatting);
+    }
+
     private readonly record struct ParsedNumericCell(double Value, string? FormatKey);
+
+    private readonly record struct CopyColumn(int SourceColumnIndex, int TargetColumnIndex, string Header);
 
     private sealed class CellStyleCache
     {
         private readonly IWorkbook _workbook;
         private readonly IDataFormat _dataFormat;
         private readonly Dictionary<string, ICellStyle> _styles = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<short, ICellStyle> _redFontStyles = new();
 
         public CellStyleCache(IWorkbook workbook)
         {
@@ -505,6 +1017,27 @@ public sealed class ExcelImportJob
             style = _workbook.CreateCellStyle();
             style.DataFormat = _dataFormat.GetFormat(ResolveFormat(key));
             _styles.Add(key, style);
+            return style;
+        }
+
+        public ICellStyle GetRedFontStyle(ICellStyle? baseStyle)
+        {
+            var baseStyleIndex = baseStyle?.Index ?? 0;
+            if (_redFontStyles.TryGetValue(baseStyleIndex, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            if (baseStyle is not null)
+            {
+                style.CloneStyleFrom(baseStyle);
+            }
+
+            var font = _workbook.CreateFont();
+            font.Color = IndexedColors.Red.Index;
+            style.SetFont(font);
+            _redFontStyles.Add(baseStyleIndex, style);
             return style;
         }
 
