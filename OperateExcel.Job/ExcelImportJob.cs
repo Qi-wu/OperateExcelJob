@@ -17,11 +17,22 @@ public sealed class ExcelImportJob
     private const string RmaSheetName = "RMA\u7533\u8bf7\u8868";
     private const string FulfillmentTemplateSheetName = "\u6a21\u7248F";
     private const string PaymentTemplateSheetName = "\u6a21\u677fP";
+    private const string SummarySheetName = "\u6c47\u603b";
     private const string WaitingOrderFileName = "\u7b49\u5f85\u4e2d\u7684\u8ba2\u5355\u53f7.xlsx";
     private const string AmazonOrderIdHeader = "amazon-order-id";
     private const string OrderStatusHeader = "order-status";
     private const int FulfillmentCopyStartColumnIndex = 11; // Excel column L.
     private const int FulfillmentCopyEndColumnIndex = 19; // Excel column T.
+    private const int FulfillmentSummaryStartRowIndex = 1334; // Excel row 1335.
+    private const int FulfillmentSummaryStartColumnIndex = 2; // Excel column C.
+    private const int FulfillmentSummaryColumnCount = 9;
+    private const int PaymentStoreSummaryStartRowIndex = 1500; // Excel row 1501.
+    private const int PaymentStoreSummaryStartColumnIndex = 2; // Excel column C.
+    private const int PaymentStoreSummaryColumnCount = 5;
+    private const int PaymentFirstDailySummaryStartColumnIndex = 0; // Excel column A.
+    private const int PaymentFirstDailySummaryColumnCount = 10; // Excel columns A:J.
+    private const int PaymentSecondDailySummaryStartColumnIndex = 14; // Excel column O.
+    private const int PaymentSecondDailySummaryColumnCount = 19; // Excel columns O:AG.
 
     private static readonly IReadOnlyDictionary<string, string> SheetSourceExtensions =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -50,6 +61,75 @@ public sealed class ExcelImportJob
         "Yue an Company",
         "DUX"
     ];
+
+    private static readonly IReadOnlyList<string> FulfillmentSummaryPeople =
+    [
+        "\u83ab\u7f8e\u7389",
+        "\u4e01\u82b3\u82b3",
+        "\u6b27\u9633\u535a\u6587",
+        "\u5176\u4ed6",
+        "\u8bb8\u6893\u6e1d",
+        "\u8c2d\u71b9\u6770",
+        "\u5510\u7487\u6dd1",
+        "\u674e\u5c0f\u5a49",
+        "\u6731\u5c0f\u71d5"
+    ];
+
+    private static readonly IReadOnlyList<string> FulfillmentSummaryStores =
+    [
+        "\u65e0\u5fe7\u65e0\u8651",
+        "AN",
+        "OYU",
+        "DUX"
+    ];
+
+    private static readonly IReadOnlyList<string> FulfillmentSummaryHeaders =
+    [
+        "\u8ba2\u5355",
+        "\u9500\u552e\u603b\u989d",
+        "\u6ea2\u4ef7",
+        "\u5e7f\u544a\u82b1\u8d39",
+        "\u6700\u7ec8\u6ea2\u4ef7",
+        "payments",
+        "Refund",
+        "payment\u6ea2\u4ef7"
+    ];
+
+    private static readonly IReadOnlyList<string> PaymentStoreSummaryHeaders =
+    [
+        "\u672c\u65e5\u9500\u552e\u989d",
+        "\u672c\u65e5\u8ba2\u5355\u6570",
+        "\u6ea2\u4ef7",
+        "\u5e7f\u544a\u8d39"
+    ];
+
+    private static readonly IReadOnlyList<string> PaymentDailySummaryHeaders =
+    [
+        "\u65e5\u671f",
+        "\u59d3\u540d",
+        "\u8ba2\u5355",
+        "\u9500\u552e\u603b\u989d",
+        "\u6ea2\u4ef7",
+        "\u5e7f\u544a\u82b1\u8d39",
+        "\u6700\u7ec8\u6ea2\u4ef7",
+        "payments",
+        "Refund",
+        "payment\u6ea2\u4ef7"
+    ];
+
+    private static readonly IReadOnlyDictionary<string, double> PaymentMonthlyBudgetByPerson =
+        new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["\u83ab\u7f8e\u7389"] = 522425D,
+            ["\u4e01\u82b3\u82b3"] = 428121D,
+            ["\u6b27\u9633\u535a\u6587"] = 504162D,
+            ["\u5176\u4ed6"] = 0D,
+            ["\u8bb8\u6893\u6e1d"] = 0D,
+            ["\u8c2d\u71b9\u6770"] = 221994D,
+            ["\u5510\u7487\u6dd1"] = 145832D,
+            ["\u674e\u5c0f\u5a49"] = 0D,
+            ["\u6731\u5c0f\u71d5"] = 0D
+        };
 
     private static readonly IReadOnlyDictionary<string, string> StoreAccountNames =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -466,11 +546,17 @@ public sealed class ExcelImportJob
 
         var copiedFulfillmentRows = CopyFilteredFulfillmentRowsToTemplate(workbook, formatter, cellStyleCache);
         var copiedPaymentRows = CopyOrderPaymentRowsToTemplate(workbook, formatter, cellStyleCache);
+        var generatedFulfillmentSummary = GenerateFulfillmentSummaryTemplates(workbook);
+        var generatedPaymentSummaryBlocks = GeneratePaymentSummaryTemplates(workbook);
+        var generatedDailySummaryRows = AppendDailySummaryTemplates(workbook, processingDate, generatedFulfillmentSummary, formatter);
         MarkWorkbookForFormulaRecalculation(workbook);
 
         messages.Add($"Highlighted {highlightedOrderIds} fulfillment rows from {WaitingOrderFileName}.");
         messages.Add($"Copied {copiedFulfillmentRows} fulfillment rows to sheet {FulfillmentTemplateSheetName}.");
         messages.Add($"Copied {copiedPaymentRows} payment rows to sheet {PaymentTemplateSheetName}.");
+        messages.Add($"Generated {generatedFulfillmentSummary.BlockCount} fulfillment summary templates from row {FulfillmentSummaryStartRowIndex + 1}.");
+        messages.Add($"Generated {generatedPaymentSummaryBlocks} payment summary templates from row {PaymentStoreSummaryStartRowIndex + 1}.");
+        messages.Add($"Appended {generatedDailySummaryRows} rows to sheet {SummarySheetName}.");
     }
 
     private HashSet<string> ReadWaitingOrderIds(DateOnly processingDate, DataFormatter formatter)
@@ -698,6 +784,606 @@ public sealed class ExcelImportJob
         }
 
         return nextTargetRowIndex - targetHeaderRowIndex - 1;
+    }
+
+    private static FulfillmentSummaryGenerationResult GenerateFulfillmentSummaryTemplates(IWorkbook workbook)
+    {
+        var sheet = workbook.GetSheet(FulfillmentTemplateSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentTemplateSheetName}");
+
+        ClearGeneratedFulfillmentSummaryArea(sheet);
+
+        var storeHeaderStyleRow = sheet.GetRow(1302); // Existing DUX header row, Excel row 1303.
+        var storePersonStyleRow = sheet.GetRow(1303); // Existing DUX first person row, Excel row 1304.
+        var storeTotalStyleRow = sheet.GetRow(1314); // Existing DUX total row, Excel row 1315.
+        var summaryTitleStyleRow = sheet.GetRow(1321); // Existing summary title row, Excel row 1322.
+        var summaryHeaderStyleRow = sheet.GetRow(1322); // Existing summary header row, Excel row 1323.
+        var summaryPersonStyleRow = sheet.GetRow(1323); // Existing summary first person row, Excel row 1324.
+        var summaryTotalStyleRow = sheet.GetRow(1333); // Existing summary total row, Excel row 1334.
+
+        var nextRowIndex = FulfillmentSummaryStartRowIndex;
+        foreach (var store in FulfillmentSummaryStores)
+        {
+            nextRowIndex = CreateStoreSummaryTemplate(
+                sheet,
+                nextRowIndex,
+                FulfillmentSummaryStartColumnIndex,
+                store,
+                storeHeaderStyleRow,
+                storePersonStyleRow,
+                storeTotalStyleRow);
+            nextRowIndex++;
+        }
+
+        var allStoreTitleRowIndex = nextRowIndex;
+        var allStoreHeaderRowIndex = allStoreTitleRowIndex + 1;
+        var allStoreFirstPersonRowIndex = allStoreHeaderRowIndex + 1;
+
+        CreateAllStoreSummaryTemplate(
+            sheet,
+            allStoreTitleRowIndex,
+            FulfillmentSummaryStartColumnIndex,
+            summaryTitleStyleRow,
+            summaryHeaderStyleRow,
+            summaryPersonStyleRow,
+            summaryTotalStyleRow);
+
+        return new FulfillmentSummaryGenerationResult(
+            FulfillmentSummaryStores.Count + 1,
+            allStoreHeaderRowIndex,
+            allStoreFirstPersonRowIndex,
+            allStoreFirstPersonRowIndex + FulfillmentSummaryPeople.Count - 1);
+    }
+
+    private static int CreateStoreSummaryTemplate(
+        ISheet sheet,
+        int headerRowIndex,
+        int startColumnIndex,
+        string storeName,
+        IRow? headerStyleRow,
+        IRow? personStyleRow,
+        IRow? totalStyleRow)
+    {
+        var headerRow = sheet.GetRow(headerRowIndex) ?? sheet.CreateRow(headerRowIndex);
+        CopyRowStyle(headerStyleRow, headerRow, FulfillmentSummaryStartColumnIndex, startColumnIndex, FulfillmentSummaryColumnCount);
+        SetStringCell(headerRow, startColumnIndex, storeName);
+        for (var i = 0; i < FulfillmentSummaryHeaders.Count; i++)
+        {
+            SetStringCell(headerRow, startColumnIndex + i + 1, FulfillmentSummaryHeaders[i]);
+        }
+
+        var firstPersonRowIndex = headerRowIndex + 1;
+        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        {
+            var rowIndex = firstPersonRowIndex + i;
+            var row = sheet.GetRow(rowIndex) ?? sheet.CreateRow(rowIndex);
+            CopyRowStyle(personStyleRow, row, FulfillmentSummaryStartColumnIndex, startColumnIndex, FulfillmentSummaryColumnCount);
+            SetStringCell(row, startColumnIndex, FulfillmentSummaryPeople[i]);
+            SetStoreSummaryFormulas(row, startColumnIndex, headerRowIndex, storeName);
+        }
+
+        var totalRowIndex = firstPersonRowIndex + FulfillmentSummaryPeople.Count;
+        var totalRow = sheet.GetRow(totalRowIndex) ?? sheet.CreateRow(totalRowIndex);
+        CopyRowStyle(totalStyleRow, totalRow, FulfillmentSummaryStartColumnIndex, startColumnIndex, FulfillmentSummaryColumnCount);
+        SetStringCell(totalRow, startColumnIndex, "\u5408\u8ba1");
+        SetSumFormulas(totalRow, startColumnIndex, firstPersonRowIndex, totalRowIndex - 1);
+
+        return totalRowIndex + 1;
+    }
+
+    private static void CreateAllStoreSummaryTemplate(
+        ISheet sheet,
+        int titleRowIndex,
+        int startColumnIndex,
+        IRow? titleStyleRow,
+        IRow? headerStyleRow,
+        IRow? personStyleRow,
+        IRow? totalStyleRow)
+    {
+        var titleRow = sheet.GetRow(titleRowIndex) ?? sheet.CreateRow(titleRowIndex);
+        CopyRowStyle(titleStyleRow, titleRow, 26, startColumnIndex, FulfillmentSummaryColumnCount); // AA:AI -> C:K.
+        SetStringCell(titleRow, startColumnIndex, "\u6c47\u603b\u603b\u8ba1");
+
+        var headerRowIndex = titleRowIndex + 1;
+        var headerRow = sheet.GetRow(headerRowIndex) ?? sheet.CreateRow(headerRowIndex);
+        CopyRowStyle(headerStyleRow, headerRow, 26, startColumnIndex, FulfillmentSummaryColumnCount);
+        SetStringCell(headerRow, startColumnIndex, "\u5168\u90e8\u5e97\u94fa");
+        for (var i = 0; i < FulfillmentSummaryHeaders.Count; i++)
+        {
+            SetStringCell(headerRow, startColumnIndex + i + 1, FulfillmentSummaryHeaders[i]);
+        }
+
+        var firstPersonRowIndex = headerRowIndex + 1;
+        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        {
+            var rowIndex = firstPersonRowIndex + i;
+            var row = sheet.GetRow(rowIndex) ?? sheet.CreateRow(rowIndex);
+            CopyRowStyle(personStyleRow, row, 26, startColumnIndex, FulfillmentSummaryColumnCount);
+            SetStringCell(row, startColumnIndex, FulfillmentSummaryPeople[i]);
+            SetAllStoreSummaryFormulas(row, startColumnIndex, headerRowIndex);
+        }
+
+        var totalRowIndex = firstPersonRowIndex + FulfillmentSummaryPeople.Count;
+        var totalRow = sheet.GetRow(totalRowIndex) ?? sheet.CreateRow(totalRowIndex);
+        CopyRowStyle(totalStyleRow, totalRow, 26, startColumnIndex, FulfillmentSummaryColumnCount);
+        SetStringCell(totalRow, startColumnIndex, "\u5408\u8ba1");
+        SetSumFormulas(totalRow, startColumnIndex, firstPersonRowIndex, totalRowIndex - 1);
+    }
+
+    private static void SetStoreSummaryFormulas(IRow row, int startColumnIndex, int headerRowIndex, string storeName)
+    {
+        var rowNumber = row.RowNum + 1;
+        var personRef = CellReference(startColumnIndex, rowNumber);
+        var refundHeaderRef = CellReference(startColumnIndex + 7, headerRowIndex + 1);
+        var storeCriterion = QuoteExcelString(storeName);
+
+        SetFormulaCell(row, startColumnIndex + 1, $"SUMIFS(D:D,A:A,{personRef},O:O,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 2, $"SUMIFS(M:M,A:A,{personRef},O:O,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 3, $"SUMIFS(K:K,A:A,{personRef},O:O,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 4, $"SUMIFS('\u5e7f\u544a'!M:M,'\u5e7f\u544a'!N:N,{personRef},'\u5e7f\u544a'!P:P,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 5, $"{CellReference(startColumnIndex + 3, rowNumber)}-{CellReference(startColumnIndex + 4, rowNumber)}");
+        SetFormulaCell(row, startColumnIndex + 6, $"SUMIFS('\u6a21\u677fP'!L:L,'\u6a21\u677fP'!A:A,{personRef},'\u6a21\u677fP'!N:N,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 7, $"SUMIFS(payments!AC:AC,payments!C:C,{refundHeaderRef},payments!AE:AE,{personRef},payments!AG:AG,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 8, $"SUMIFS('\u6a21\u677fP'!J:J,'\u6a21\u677fP'!A:A,{personRef},'\u6a21\u677fP'!N:N,{storeCriterion})");
+    }
+
+    private static void SetAllStoreSummaryFormulas(IRow row, int startColumnIndex, int headerRowIndex)
+    {
+        var rowNumber = row.RowNum + 1;
+        var personRef = CellReference(startColumnIndex, rowNumber);
+        var refundHeaderRef = CellReference(startColumnIndex + 7, headerRowIndex + 1);
+
+        SetFormulaCell(row, startColumnIndex + 1, $"SUMIFS(D:D,A:A,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 2, $"SUMIFS(M:M,A:A,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 3, $"SUMIFS(K:K,A:A,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 4, $"SUMIFS('\u5e7f\u544a'!M:M,'\u5e7f\u544a'!N:N,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 5, $"{CellReference(startColumnIndex + 3, rowNumber)}-{CellReference(startColumnIndex + 4, rowNumber)}");
+        SetFormulaCell(row, startColumnIndex + 6, $"SUMIFS('\u6a21\u677fP'!L:L,'\u6a21\u677fP'!A:A,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 7, $"SUMIFS(payments!AC:AC,payments!C:C,{refundHeaderRef},payments!AE:AE,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 8, $"SUMIFS('\u6a21\u677fP'!J:J,'\u6a21\u677fP'!A:A,{personRef})");
+    }
+
+    private static void SetSumFormulas(IRow row, int startColumnIndex, int firstRowIndex, int lastRowIndex)
+    {
+        var firstRowNumber = firstRowIndex + 1;
+        var lastRowNumber = lastRowIndex + 1;
+        for (var columnIndex = startColumnIndex + 1; columnIndex < startColumnIndex + FulfillmentSummaryColumnCount; columnIndex++)
+        {
+            var columnName = ColumnIndexToName(columnIndex);
+            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+        }
+    }
+
+    private static void SetColumnSumFormulas(IRow row, int startColumnIndex, int columnCount, int firstRowIndex, int lastRowIndex)
+    {
+        var firstRowNumber = firstRowIndex + 1;
+        var lastRowNumber = lastRowIndex + 1;
+        for (var columnIndex = startColumnIndex; columnIndex < startColumnIndex + columnCount; columnIndex++)
+        {
+            var columnName = ColumnIndexToName(columnIndex);
+            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+        }
+    }
+
+    private static void ClearGeneratedFulfillmentSummaryArea(ISheet sheet)
+    {
+        for (var rowIndex = FulfillmentSummaryStartRowIndex; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            for (var columnIndex = FulfillmentSummaryStartColumnIndex;
+                 columnIndex < FulfillmentSummaryStartColumnIndex + FulfillmentSummaryColumnCount;
+                 columnIndex++)
+            {
+                var cell = row.GetCell(columnIndex);
+                if (cell is not null)
+                {
+                    row.RemoveCell(cell);
+                }
+            }
+        }
+    }
+
+    private static int GeneratePaymentSummaryTemplates(IWorkbook workbook)
+    {
+        var sheet = workbook.GetSheet(PaymentTemplateSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {PaymentTemplateSheetName}");
+
+        ClearGeneratedPaymentSummaryArea(sheet);
+
+        var headerStyleRow = sheet.GetRow(1486); // Existing DUX header row, Excel row 1487.
+        var personStyleRow = sheet.GetRow(1487); // Existing DUX first person row, Excel row 1488.
+        var totalStyleRow = sheet.GetRow(1498); // Existing DUX total row, Excel row 1499.
+
+        var nextRowIndex = PaymentStoreSummaryStartRowIndex;
+        foreach (var store in FulfillmentSummaryStores)
+        {
+            nextRowIndex = CreatePaymentStoreSummaryTemplate(
+                sheet,
+                nextRowIndex,
+                PaymentStoreSummaryStartColumnIndex,
+                store,
+                headerStyleRow,
+                personStyleRow,
+                totalStyleRow);
+            nextRowIndex++;
+        }
+
+        return FulfillmentSummaryStores.Count;
+    }
+
+    private static int CreatePaymentStoreSummaryTemplate(
+        ISheet sheet,
+        int headerRowIndex,
+        int startColumnIndex,
+        string storeName,
+        IRow? headerStyleRow,
+        IRow? personStyleRow,
+        IRow? totalStyleRow)
+    {
+        var headerRow = sheet.GetRow(headerRowIndex) ?? sheet.CreateRow(headerRowIndex);
+        CopyRowStyle(headerStyleRow, headerRow, 3, startColumnIndex, PaymentStoreSummaryColumnCount); // D:H -> C:G.
+        SetStringCell(headerRow, startColumnIndex, storeName);
+        for (var i = 0; i < PaymentStoreSummaryHeaders.Count; i++)
+        {
+            SetStringCell(headerRow, startColumnIndex + i + 1, PaymentStoreSummaryHeaders[i]);
+        }
+
+        var firstPersonRowIndex = headerRowIndex + 1;
+        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        {
+            var rowIndex = firstPersonRowIndex + i;
+            var row = sheet.GetRow(rowIndex) ?? sheet.CreateRow(rowIndex);
+            CopyRowStyle(personStyleRow, row, 3, startColumnIndex, PaymentStoreSummaryColumnCount);
+            SetStringCell(row, startColumnIndex, FulfillmentSummaryPeople[i]);
+            SetPaymentStoreSummaryFormulas(row, startColumnIndex, storeName);
+        }
+
+        var totalRowIndex = firstPersonRowIndex + FulfillmentSummaryPeople.Count;
+        var totalRow = sheet.GetRow(totalRowIndex) ?? sheet.CreateRow(totalRowIndex);
+        CopyRowStyle(totalStyleRow, totalRow, 3, startColumnIndex, PaymentStoreSummaryColumnCount);
+        SetStringCell(totalRow, startColumnIndex, "\u5408\u8ba1");
+        SetColumnSumFormulas(totalRow, startColumnIndex + 1, PaymentStoreSummaryColumnCount - 1, firstPersonRowIndex, totalRowIndex - 1);
+
+        return totalRowIndex + 1;
+    }
+
+    private static void SetPaymentStoreSummaryFormulas(IRow row, int startColumnIndex, string storeName)
+    {
+        var rowNumber = row.RowNum + 1;
+        var personRef = CellReference(startColumnIndex, rowNumber);
+        var storeCriterion = QuoteExcelString(storeName);
+
+        SetFormulaCell(row, startColumnIndex + 1, $"SUMIFS(L:L,A:A,{personRef},N:N,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 2, $"SUMIFS(D:D,A:A,{personRef},N:N,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 3, $"SUMIFS(J:J,A:A,{personRef},N:N,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 4, $"SUMIFS('\u5e7f\u544a'!M:M,'\u5e7f\u544a'!N:N,{personRef},'\u5e7f\u544a'!P:P,{storeCriterion})");
+    }
+
+    private static void ClearGeneratedPaymentSummaryArea(ISheet sheet)
+    {
+        for (var rowIndex = PaymentStoreSummaryStartRowIndex; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            for (var columnIndex = PaymentStoreSummaryStartColumnIndex;
+                 columnIndex < PaymentStoreSummaryStartColumnIndex + PaymentStoreSummaryColumnCount;
+                 columnIndex++)
+            {
+                var cell = row.GetCell(columnIndex);
+                if (cell is not null)
+                {
+                    row.RemoveCell(cell);
+                }
+            }
+        }
+    }
+
+    private static int AppendDailySummaryTemplates(
+        IWorkbook workbook,
+        DateOnly processingDate,
+        FulfillmentSummaryGenerationResult fulfillmentSummary,
+        DataFormatter formatter)
+    {
+        var fulfillmentSheet = workbook.GetSheet(FulfillmentTemplateSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentTemplateSheetName}");
+        var summarySheet = workbook.GetSheet(SummarySheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {SummarySheetName}");
+
+        var firstSummaryRowIndex = FindNextAppendRowIndex(summarySheet, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryColumnCount);
+        AppendFirstDailySummaryRows(
+            summarySheet,
+            fulfillmentSheet,
+            processingDate,
+            fulfillmentSummary,
+            firstSummaryRowIndex);
+
+        var secondSummaryFirstRowIndex = FindNextSecondDailySummaryRowIndex(summarySheet);
+        AppendSecondDailySummaryRows(
+            summarySheet,
+            processingDate,
+            secondSummaryFirstRowIndex,
+            formatter);
+
+        return FulfillmentSummaryPeople.Count + FulfillmentSummaryPeople.Count + 1;
+    }
+
+    private static void AppendFirstDailySummaryRows(
+        ISheet summarySheet,
+        ISheet fulfillmentSheet,
+        DateOnly processingDate,
+        FulfillmentSummaryGenerationResult fulfillmentSummary,
+        int startRowIndex)
+    {
+        var styleRow = summarySheet.GetRow(Math.Max(1, startRowIndex - 1)) ?? summarySheet.GetRow(1);
+        var sourceHeaderIndex = ReadHeaderIndexAtColumns(
+            fulfillmentSheet.GetRow(fulfillmentSummary.AllStoreHeaderRowIndex),
+            FulfillmentSummaryStartColumnIndex,
+            FulfillmentSummaryColumnCount);
+        var targetHeaderIndex = ReadHeaderIndexAtColumns(
+            summarySheet.GetRow(0),
+            PaymentFirstDailySummaryStartColumnIndex,
+            PaymentFirstDailySummaryColumnCount);
+
+        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        {
+            var targetRowIndex = startRowIndex + i;
+            var targetRow = summarySheet.GetRow(targetRowIndex) ?? summarySheet.CreateRow(targetRowIndex);
+            CopyRowStyle(styleRow, targetRow, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryColumnCount);
+
+            SetDateCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u65e5\u671f", SummarySheetName), processingDate);
+            SetStringCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u59d3\u540d", SummarySheetName), FulfillmentSummaryPeople[i]);
+
+            var sourceRow = fulfillmentSheet.GetRow(fulfillmentSummary.AllStoreFirstPersonRowIndex + i)
+                ?? throw new InvalidOperationException($"Summary source row not found in sheet: {FulfillmentTemplateSheetName}");
+
+            foreach (var header in PaymentDailySummaryHeaders.Skip(2))
+            {
+                if (!targetHeaderIndex.TryGetValue(header, out var targetColumnIndex)
+                    || !sourceHeaderIndex.TryGetValue(header, out var sourceColumnIndex))
+                {
+                    continue;
+                }
+
+                SetFormulaCell(
+                    targetRow,
+                    targetColumnIndex,
+                    $"'{FulfillmentTemplateSheetName}'!{CellReference(sourceColumnIndex, sourceRow.RowNum + 1)}");
+            }
+        }
+    }
+
+    private static void AppendSecondDailySummaryRows(
+        ISheet summarySheet,
+        DateOnly processingDate,
+        int startRowIndex,
+        DataFormatter formatter)
+    {
+        var templatePersonRow = FindSecondDailySummaryTemplatePersonRow(summarySheet, formatter)
+            ?? throw new InvalidOperationException($"No second summary template row found in sheet: {SummarySheetName}");
+        var lastTotalRowIndex = FindLastTotalRowIndex(summarySheet, PaymentSecondDailySummaryStartColumnIndex);
+
+        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        {
+            var personName = FulfillmentSummaryPeople[i];
+            var targetRowIndex = startRowIndex + i;
+            var targetRow = summarySheet.GetRow(targetRowIndex) ?? summarySheet.CreateRow(targetRowIndex);
+            CopyRowStyle(templatePersonRow, targetRow, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryColumnCount);
+            SetDateCell(targetRow, PaymentSecondDailySummaryStartColumnIndex, processingDate);
+            SetStringCell(targetRow, PaymentSecondDailySummaryStartColumnIndex + 1, personName);
+            SetSecondDailySummaryPersonFormulas(targetRow, personName);
+        }
+
+        var totalRowIndex = startRowIndex + FulfillmentSummaryPeople.Count;
+        var totalRow = summarySheet.GetRow(totalRowIndex) ?? summarySheet.CreateRow(totalRowIndex);
+        var templateTotalRow = summarySheet.GetRow(lastTotalRowIndex) ?? templatePersonRow;
+        CopyRowStyle(templateTotalRow, totalRow, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryColumnCount);
+        SetStringCell(totalRow, PaymentSecondDailySummaryStartColumnIndex, "\u5408\u8ba1");
+        SetSecondDailySummaryTotalFormulas(totalRow, startRowIndex, totalRowIndex - 1);
+    }
+
+    private static void SetSecondDailySummaryPersonFormulas(IRow row, string personName)
+    {
+        var rowNumber = row.RowNum + 1;
+        var personRef = CellReference(PaymentSecondDailySummaryStartColumnIndex + 1, rowNumber);
+
+        SetFormulaCell(row, 16, $"SUMIFS($C:$C,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetFormulaCell(row, 17, $"SUMIFS($D:$D,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetFormulaCell(row, 18, $"SUMIFS($E:$E,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
+        SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
+        SetFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
+        SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+        SetFormulaCell(row, 29, $"AF{rowNumber}/30");
+        SetFormulaCell(row, 30, $"X{rowNumber}+Z{rowNumber}+SUMIFS($AE:$AE,$O:$O,O{rowNumber}-1,$P:$P,{personRef})");
+        SetNumericCell(row, 31, PaymentMonthlyBudgetByPerson.TryGetValue(personName, out var budget) ? budget : 0D);
+        SetFormulaCell(row, 32, $"R{rowNumber}-AD{rowNumber}");
+    }
+
+    private static void SetSecondDailySummaryTotalFormulas(IRow row, int firstRowIndex, int lastRowIndex)
+    {
+        var rowNumber = row.RowNum + 1;
+        var firstRowNumber = firstRowIndex + 1;
+        var lastRowNumber = lastRowIndex + 1;
+
+        foreach (var columnIndex in new[] { 16, 17, 18, 19, 23, 25, 26, 27, 29, 30, 31 })
+        {
+            var columnName = ColumnIndexToName(columnIndex);
+            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+        }
+
+        SetFormulaCell(row, 21, $"T{rowNumber}/R{rowNumber}");
+        SetFormulaCell(row, 22, $"U{rowNumber}/R{rowNumber}");
+        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+    }
+
+    private static IRow? FindSecondDailySummaryTemplatePersonRow(ISheet sheet, DataFormatter formatter)
+    {
+        for (var rowIndex = 1; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var date = formatter.FormatCellValue(row.GetCell(PaymentSecondDailySummaryStartColumnIndex)).Trim();
+            var name = formatter.FormatCellValue(row.GetCell(PaymentSecondDailySummaryStartColumnIndex + 1)).Trim();
+            if (date.Length > 0 && name.Length > 0 && !string.Equals(date, "\u5408\u8ba1", StringComparison.OrdinalIgnoreCase))
+            {
+                return row;
+            }
+        }
+
+        return null;
+    }
+
+    private static int FindNextSecondDailySummaryRowIndex(ISheet sheet)
+    {
+        return FindLastTotalRowIndex(sheet, PaymentSecondDailySummaryStartColumnIndex) + 1;
+    }
+
+    private static int FindLastTotalRowIndex(ISheet sheet, int columnIndex)
+    {
+        for (var rowIndex = sheet.LastRowNum; rowIndex >= 1; rowIndex--)
+        {
+            var row = sheet.GetRow(rowIndex);
+            var cell = row?.GetCell(columnIndex);
+            if (cell is not null && string.Equals(cell.ToString()?.Trim(), "\u5408\u8ba1", StringComparison.OrdinalIgnoreCase))
+            {
+                return rowIndex;
+            }
+        }
+
+        throw new InvalidOperationException($"No total row found in sheet: {sheet.SheetName}");
+    }
+
+    private static int FindNextAppendRowIndex(ISheet sheet, int startColumnIndex, int columnCount)
+    {
+        for (var rowIndex = sheet.LastRowNum; rowIndex >= 0; rowIndex--)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            for (var columnIndex = startColumnIndex; columnIndex < startColumnIndex + columnCount; columnIndex++)
+            {
+                var cell = row.GetCell(columnIndex);
+                if (cell is not null && !string.IsNullOrWhiteSpace(cell.ToString()))
+                {
+                    return rowIndex + 1;
+                }
+            }
+        }
+
+        return 1;
+    }
+
+    private static Dictionary<string, int> ReadHeaderIndexAtColumns(IRow? row, int startColumnIndex, int columnCount)
+    {
+        if (row is null)
+        {
+            throw new InvalidOperationException("Header row not found.");
+        }
+
+        var index = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var columnIndex = startColumnIndex; columnIndex < startColumnIndex + columnCount; columnIndex++)
+        {
+            var header = row.GetCell(columnIndex)?.ToString()?.Trim() ?? string.Empty;
+            if (header.Length > 0 && !index.ContainsKey(header))
+            {
+                index.Add(header, columnIndex);
+            }
+        }
+
+        return index;
+    }
+
+    private static void SetDateCell(IRow row, int columnIndex, DateOnly date)
+    {
+        var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
+        cell.SetCellValue(date.ToDateTime(TimeOnly.MinValue));
+    }
+
+    private static void CopyRowStyle(IRow? sourceRow, IRow targetRow, int sourceStartColumnIndex, int targetStartColumnIndex, int columnCount)
+    {
+        if (sourceRow is null)
+        {
+            return;
+        }
+
+        targetRow.Height = sourceRow.Height;
+        for (var i = 0; i < columnCount; i++)
+        {
+            var sourceCell = sourceRow.GetCell(sourceStartColumnIndex + i);
+            if (sourceCell is null)
+            {
+                continue;
+            }
+
+            var targetCell = targetRow.GetCell(targetStartColumnIndex + i) ?? targetRow.CreateCell(targetStartColumnIndex + i);
+            targetCell.CellStyle = sourceCell.CellStyle;
+        }
+    }
+
+    private static void SetStringCell(IRow row, int columnIndex, string value)
+    {
+        var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
+        cell.SetCellValue(value);
+    }
+
+    private static void SetFormulaCell(IRow row, int columnIndex, string formula)
+    {
+        var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
+        cell.SetCellFormula(formula);
+    }
+
+    private static void SetNumericCell(IRow row, int columnIndex, double value)
+    {
+        var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
+        cell.SetCellValue(value);
+    }
+
+    private static string CellReference(int zeroBasedColumnIndex, int oneBasedRowNumber)
+    {
+        return $"{ColumnIndexToName(zeroBasedColumnIndex)}{oneBasedRowNumber}";
+    }
+
+    private static string ColumnIndexToName(int zeroBasedColumnIndex)
+    {
+        var columnNumber = zeroBasedColumnIndex + 1;
+        var name = string.Empty;
+        while (columnNumber > 0)
+        {
+            columnNumber--;
+            name = (char)('A' + columnNumber % 26) + name;
+            columnNumber /= 26;
+        }
+
+        return name;
+    }
+
+    private static string QuoteExcelString(string value)
+    {
+        return $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
     }
 
     private DateOnly ResolveProcessingDate()
@@ -1536,6 +2222,12 @@ public sealed class ExcelImportJob
     private sealed record MappingSourceSheet(string AccountName, IReadOnlyList<string> SheetNameCandidates);
 
     private readonly record struct CopyColumn(int SourceColumnIndex, int TargetColumnIndex, string Header);
+
+    private readonly record struct FulfillmentSummaryGenerationResult(
+        int BlockCount,
+        int AllStoreHeaderRowIndex,
+        int AllStoreFirstPersonRowIndex,
+        int AllStoreLastPersonRowIndex);
 
     private sealed class CellStyleCache
     {
