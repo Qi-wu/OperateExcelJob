@@ -4,6 +4,8 @@
 
 ## What it imports
 
+- `B2B（ol)` sheet is filled first from the previous day's Feishu bitable attachment `损益表`.
+
 - `fulfillment` sheet reads store `.txt` files.
 - `payments` sheet reads store `.csv` files.
 - `广告` sheet reads store `.xlsx` files.
@@ -25,6 +27,22 @@ D:\code\OperateExcelTemp\2026-05-23\2026-05-23
 ```
 
 Use `--date=yyyy-MM-dd` only for manual backfill.
+
+## Feishu attachment import
+
+Before importing `fulfillment`, `payments`, and `广告`, the job queries the configured Feishu bitable record whose `日期` field equals the processing date, validates that the `损益表` attachment exists and contains exactly one `.xlsx` file, downloads it, then copies the `B2BOL` sheet into `B2B（ol)` by matching column headers.
+
+Fill these values in `OperateExcel.Job/appsettings.json` before running:
+
+```json
+"Feishu": {
+  "Enabled": true,
+  "AppId": "your-app-id",
+  "AppSecret": "your-app-secret"
+}
+```
+
+If the Feishu attachment is missing, not `.xlsx`, or has more than one file, the job logs `附件读取失败` and stops.
 
 ## Run once
 

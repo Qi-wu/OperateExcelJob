@@ -76,11 +76,19 @@ public sealed class ExcelImportJob
         RegexOptions.Compiled);
 
     private readonly ExcelImportOptions _options;
+    private readonly FeishuOptions _feishuOptions;
+    private readonly FeishuApiClient _feishuClient;
     private readonly ILogger<ExcelImportJob> _logger;
 
-    public ExcelImportJob(IOptions<ExcelImportOptions> options, ILogger<ExcelImportJob> logger)
+    public ExcelImportJob(
+        IOptions<ExcelImportOptions> options,
+        IOptions<FeishuOptions> feishuOptions,
+        FeishuApiClient feishuClient,
+        ILogger<ExcelImportJob> logger)
     {
         _options = options.Value;
+        _feishuOptions = feishuOptions.Value;
+        _feishuClient = feishuClient;
         _logger = logger;
     }
 
@@ -124,6 +132,8 @@ public sealed class ExcelImportJob
         }
         var formatter = new DataFormatter();
         var cellStyleCache = new CellStyleCache(workbook);
+
+        ImportB2BOlFromFeishu(workbook, processingDate, formatter, cellStyleCache, messages);
 
         var importedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
@@ -244,6 +254,47 @@ public sealed class ExcelImportJob
             result.AdvertisingRows);
 
         return result;
+    }
+
+    private void ImportB2BOlFromFeishu(
+        IWorkbook targetWorkbook,
+        DateOnly processingDate,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache,
+        ICollection<string> messages)
+    {
+        if (!_feishuOptions.Enabled)
+        {
+            messages.Add("Skipped Feishu B2B（ol） import: Feishu import is disabled.");
+            _logger.LogWarning("Skipped Feishu B2B（ol） import because Feishu import is disabled.");
+            return;
+        }
+
+        if (!_feishuClient.IsConfigured)
+        {
+            throw new InvalidOperationException("Feishu B2B（ol） import is enabled, but AppId/AppSecret or table configuration is incomplete.");
+        }
+
+        var attachmentBytes = _feishuClient
+            .DownloadProfitAttachmentAsync(processingDate)
+            .GetAwaiter()
+            .GetResult();
+
+        using var stream = new MemoryStream(attachmentBytes);
+        var sourceWorkbook = WorkbookFactory.Create(stream);
+        try
+        {
+            var sourceTable = ReadExcelTable(sourceWorkbook, _feishuOptions.SourceSheetName, formatter);
+            var targetSheet = FindSheet(targetWorkbook, _feishuOptions.TargetSheetName)
+                ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.TargetSheetName}");
+
+            var importedRows = CopyTableDataToSheet(sourceTable, targetSheet, formatter, cellStyleCache);
+            messages.Add($"Imported {importedRows} rows from Feishu sheet {_feishuOptions.SourceSheetName} to sheet {_feishuOptions.TargetSheetName}.");
+        }
+        finally
+        {
+            sourceWorkbook.Close();
+        }
     }
 
     private void ApplyPostImportRules(
@@ -531,11 +582,24 @@ public sealed class ExcelImportJob
     {
         using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         var workbook = WorkbookFactory.Create(stream);
-        var sheet = workbook.GetSheetAt(0);
+        var table = ReadExcelTable(workbook, workbook.GetSheetAt(0), formatter);
+        workbook.Close();
+        return table;
+    }
+
+    private static TableData ReadExcelTable(IWorkbook workbook, string sheetName, DataFormatter formatter)
+    {
+        var sheet = FindSheet(workbook, sheetName)
+            ?? throw new InvalidOperationException($"Sheet not found in source workbook: {sheetName}");
+
+        return ReadExcelTable(workbook, sheet, formatter);
+    }
+
+    private static TableData ReadExcelTable(IWorkbook workbook, ISheet sheet, DataFormatter formatter)
+    {
         var headerRowIndex = FindHeaderRow(sheet, formatter);
         if (headerRowIndex < 0)
         {
-            workbook.Close();
             return new TableData([], []);
         }
 
@@ -559,8 +623,77 @@ public sealed class ExcelImportJob
             }
         }
 
-        workbook.Close();
         return new TableData(headers, rows);
+    }
+
+    private static int CopyTableDataToSheet(
+        TableData sourceTable,
+        ISheet targetSheet,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
+    {
+        var targetHeaderRowIndex = FindHeaderRow(targetSheet, formatter);
+        if (targetHeaderRowIndex < 0)
+        {
+            throw new InvalidOperationException($"No header row found in sheet: {targetSheet.SheetName}");
+        }
+
+        var targetHeaders = ReadRow(targetSheet.GetRow(targetHeaderRowIndex), formatter)
+            .Select(DelimitedTableReader.CleanHeader)
+            .ToList();
+        var sourceIndex = BuildHeaderIndex(sourceTable.Headers);
+        var writableColumns = targetHeaders
+            .Select((header, columnIndex) => new CopyColumn(
+                sourceIndex.TryGetValue(header, out var sourceColumnIndex) ? sourceColumnIndex : -1,
+                columnIndex,
+                header))
+            .Where(column => column.Header.Length > 0 && column.SourceColumnIndex >= 0)
+            .ToList();
+
+        if (writableColumns.Count == 0)
+        {
+            throw new InvalidOperationException($"No matching columns for sheet: {targetSheet.SheetName}");
+        }
+
+        ClearWritableCells(targetSheet, targetHeaderRowIndex, writableColumns.Select(column => column.TargetColumnIndex));
+
+        var nextTargetRowIndex = targetHeaderRowIndex + 1;
+        foreach (var sourceRow in sourceTable.Rows)
+        {
+            var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
+            foreach (var column in writableColumns)
+            {
+                var value = column.SourceColumnIndex < sourceRow.Count
+                    ? sourceRow[column.SourceColumnIndex]
+                    : string.Empty;
+
+                SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
+            }
+
+            nextTargetRowIndex++;
+        }
+
+        return sourceTable.Rows.Count;
+    }
+
+    private static ISheet? FindSheet(IWorkbook workbook, string sheetName)
+    {
+        var sheet = workbook.GetSheet(sheetName);
+        if (sheet is not null)
+        {
+            return sheet;
+        }
+
+        for (var i = 0; i < workbook.NumberOfSheets; i++)
+        {
+            sheet = workbook.GetSheetAt(i);
+            if (string.Equals(sheet.SheetName, sheetName, StringComparison.OrdinalIgnoreCase))
+            {
+                return sheet;
+            }
+        }
+
+        return null;
     }
 
     private static int FindHeaderRow(ISheet sheet, DataFormatter formatter)

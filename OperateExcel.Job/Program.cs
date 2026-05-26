@@ -5,6 +5,7 @@ using OperateExcel.Job;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<ExcelImportOptions>(builder.Configuration.GetSection("ExcelImport"));
+builder.Services.Configure<FeishuOptions>(builder.Configuration.GetSection("Feishu"));
 builder.Services.PostConfigure<ExcelImportOptions>(options =>
 {
     foreach (var arg in args)
@@ -23,6 +24,7 @@ builder.Services.PostConfigure<ExcelImportOptions>(options =>
         }
     }
 });
+builder.Services.AddHttpClient<FeishuApiClient>();
 builder.Services.AddSingleton<ExcelImportJob>();
 
 var hangfireConnectionString = builder.Configuration.GetConnectionString("Hangfire");
