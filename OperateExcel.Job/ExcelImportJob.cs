@@ -49,6 +49,16 @@ public sealed class ExcelImportJob
         "DUX"
     ];
 
+    private static readonly IReadOnlyDictionary<string, string> StoreAccountNames =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["\u65e0\u5fe7\u65e0\u8651"] = "\u65e0\u5fe7\u65e0\u8651",
+            ["Oyumoents"] = "OYU",
+            ["Yue an Company"] = "AN",
+            ["Dux"] = "DUX",
+            ["DUX"] = "DUX"
+        };
+
     private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> SheetHeaderAliases =
         new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
         {
@@ -157,11 +167,14 @@ public sealed class ExcelImportJob
             var targetHeaders = ReadRow(targetSheet.GetRow(targetHeaderRowIndex), formatter)
                 .Select(DelimitedTableReader.CleanHeader)
                 .ToList();
+            var accountColumnIndex = ResolveAccountColumnIndex(targetHeaders);
 
             var nextTargetRowIndex = targetHeaderRowIndex + 1;
 
             foreach (var storeDirectory in OrderStoreDirectories(storeDirectories))
             {
+                var storeName = Path.GetFileName(storeDirectory);
+                var accountName = ResolveAccountName(storeName);
                 var sourceFile = Directory.GetFiles(storeDirectory, $"*{extension}", SearchOption.TopDirectoryOnly)
                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                     .FirstOrDefault();
@@ -193,7 +206,12 @@ public sealed class ExcelImportJob
 
                 if (_options.ClearExistingData && nextTargetRowIndex == targetHeaderRowIndex + 1)
                 {
-                    ClearWritableCells(targetSheet, targetHeaderRowIndex, writableColumns.Select(column => column.TargetColumnIndex));
+                    ClearWritableCells(
+                        targetSheet,
+                        targetHeaderRowIndex,
+                        writableColumns
+                            .Select(column => column.TargetColumnIndex)
+                            .Concat(accountColumnIndex >= 0 ? [accountColumnIndex] : []));
                 }
 
                 if (writableColumns.Count == 0)
@@ -212,6 +230,11 @@ public sealed class ExcelImportJob
                             : string.Empty;
 
                         SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
+                    }
+
+                    if (accountColumnIndex >= 0)
+                    {
+                        SetCellValue(targetRow.CreateCell(accountColumnIndex), accountName, cellStyleCache);
                     }
 
                     importedCounts[sheetName]++;
@@ -576,6 +599,26 @@ public sealed class ExcelImportJob
             && aliases.TryGetValue(targetHeader, out var sourceHeader)
                 ? sourceHeader
                 : targetHeader;
+    }
+
+    private static string ResolveAccountName(string storeName)
+    {
+        return StoreAccountNames.TryGetValue(storeName, out var accountName)
+            ? accountName
+            : storeName;
+    }
+
+    private static int ResolveAccountColumnIndex(IReadOnlyList<string> targetHeaders)
+    {
+        for (var columnIndex = 0; columnIndex < targetHeaders.Count; columnIndex++)
+        {
+            if (string.Equals(targetHeaders[columnIndex], "\u8d26\u53f7", StringComparison.OrdinalIgnoreCase))
+            {
+                return columnIndex;
+            }
+        }
+
+        return -1;
     }
 
     private static TableData ReadExcelTable(string path, DataFormatter formatter)
