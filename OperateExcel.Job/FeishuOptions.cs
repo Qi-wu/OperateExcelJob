@@ -12,6 +12,7 @@ public sealed class FeishuOptions
     public string DateFieldName { get; set; } = "\u65e5\u671f";
     public string AttachmentFieldName { get; set; } = "\u635f\u76ca\u8868";
     public string MappingAttachmentFieldName { get; set; } = "\u6620\u5c04\u8868";
+    public string RmaAttachmentFieldName { get; set; } = "RMA\u7533\u8bf7\u8868";
     public string SourceSheetName { get; set; } = "B2BOL";
     public string TargetSheetName { get; set; } = "B2B\uff08ol)";
     public string MappingTargetSheetName { get; set; } = "\u6620\u5c04\u8868";

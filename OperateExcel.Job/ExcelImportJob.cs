@@ -14,6 +14,7 @@ public sealed class ExcelImportJob
     private const string FulfillmentSheetName = "fulfillment";
     private const string PaymentsSheetName = "payments";
     private const string MappingSheetName = "\u6620\u5c04\u8868";
+    private const string RmaSheetName = "RMA\u7533\u8bf7\u8868";
     private const string FulfillmentTemplateSheetName = "\u6a21\u7248F";
     private const string PaymentTemplateSheetName = "\u6a21\u677fP";
     private const string WaitingOrderFileName = "\u7b49\u5f85\u4e2d\u7684\u8ba2\u5355\u53f7.xlsx";
@@ -75,6 +76,20 @@ public sealed class ExcelImportJob
             "Asin",
             "B2B Item Code",
             "\u8fd0\u8425"
+        };
+
+    private static readonly IReadOnlyDictionary<string, string> RmaColumnMap =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["date/time"] = "\u65e5\u671f",
+            ["order id"] = "order id",
+            ["sku"] = "sku",
+            ["quantity"] = "\u6570\u91cf",
+            ["code"] = "Item Code",
+            ["total"] = "total",
+            ["\u5f52\u5c5e"] = "\u5f52\u5c5e",
+            ["\u5382\u5bb6"] = "\u5382\u5bb6",
+            ["\u8d26\u53f7"] = "\u5e97\u94fa"
         };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> SheetHeaderAliases =
@@ -264,6 +279,8 @@ public sealed class ExcelImportJob
             }
         }
 
+        UpdateRmaApplicationFromRefundPayments(workbook, processingDate, formatter, cellStyleCache, messages);
+
         ApplyPostImportRules(workbook, processingDate, formatter, cellStyleCache, messages);
 
         var tempOutput = Path.Combine(
@@ -377,6 +394,63 @@ public sealed class ExcelImportJob
         finally
         {
             sourceWorkbook.Close();
+        }
+    }
+
+    private void UpdateRmaApplicationFromRefundPayments(
+        IWorkbook importedWorkbook,
+        DateOnly processingDate,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache,
+        ICollection<string> messages)
+    {
+        if (!_feishuOptions.Enabled)
+        {
+            messages.Add("Skipped Feishu RMA update: Feishu import is disabled.");
+            _logger.LogWarning("Skipped Feishu RMA update because Feishu import is disabled.");
+            return;
+        }
+
+        if (!_feishuClient.IsConfigured)
+        {
+            throw new InvalidOperationException("Feishu RMA update is enabled, but AppId/AppSecret or table configuration is incomplete.");
+        }
+
+        var refundRows = ReadRefundPaymentRows(importedWorkbook, formatter);
+        if (refundRows.Count == 0)
+        {
+            messages.Add("Skipped Feishu RMA update: no Refund rows found in payments.");
+            return;
+        }
+
+        var sourceRecordDate = processingDate.AddDays(-1);
+        var rmaBytes = _feishuClient
+            .DownloadRmaAttachmentAsync(sourceRecordDate)
+            .GetAwaiter()
+            .GetResult();
+
+        using var inputStream = new MemoryStream(rmaBytes);
+        var rmaWorkbook = WorkbookFactory.Create(inputStream);
+        try
+        {
+            var targetSheetName = BuildRmaMonthSheetName(processingDate);
+            var targetSheet = FindSheet(rmaWorkbook, targetSheetName) ?? rmaWorkbook.CreateSheet(targetSheetName);
+            var appendedRows = AppendRefundRowsToRmaSheet(refundRows, targetSheet, formatter, cellStyleCache);
+
+            using var outputStream = new MemoryStream();
+            rmaWorkbook.Write(outputStream, leaveOpen: true);
+            var outputBytes = outputStream.ToArray();
+            var uploadFileDate = processingDate.AddDays(1);
+            _feishuClient
+                .UploadRmaAttachmentAsync(processingDate, $"{RmaSheetName}{uploadFileDate.Month}-{uploadFileDate.Day}.xlsx", outputBytes)
+                .GetAwaiter()
+                .GetResult();
+
+            messages.Add($"Appended {appendedRows} Refund payment rows to RMA sheet {targetSheet.SheetName} and uploaded it to Feishu date {processingDate:yyyy-MM-dd}.");
+        }
+        finally
+        {
+            rmaWorkbook.Close();
         }
     }
 
@@ -841,6 +915,129 @@ public sealed class ExcelImportJob
         return nextTargetRowIndex - targetHeaderRowIndex - 1;
     }
 
+    private static IReadOnlyList<IReadOnlyDictionary<string, string>> ReadRefundPaymentRows(
+        IWorkbook workbook,
+        DataFormatter formatter)
+    {
+        var evaluator = workbook.GetCreationHelper().CreateFormulaEvaluator();
+        var paymentSheet = workbook.GetSheet(PaymentsSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {PaymentsSheetName}");
+        var headerRowIndex = FindHeaderRow(paymentSheet, formatter);
+        var headerIndex = ReadHeaderIndex(paymentSheet, headerRowIndex, formatter);
+        var typeColumnIndex = ResolveRequiredColumn(headerIndex, "type", PaymentsSheetName);
+        var sourceColumns = RmaColumnMap
+            .Select(mapping => new
+            {
+                SourceHeader = mapping.Key,
+                TargetHeader = mapping.Value,
+                SourceColumnIndex = ResolveRequiredColumn(headerIndex, mapping.Key, PaymentsSheetName)
+            })
+            .ToList();
+
+        var refundRows = new List<IReadOnlyDictionary<string, string>>();
+        for (var rowIndex = headerRowIndex + 1; rowIndex <= paymentSheet.LastRowNum; rowIndex++)
+        {
+            var row = paymentSheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var type = formatter.FormatCellValue(row.GetCell(typeColumnIndex)).Trim();
+            if (!string.Equals(type, "Refund", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var column in sourceColumns)
+            {
+                values[column.TargetHeader] = FormatCellResolvedValue(
+                    row.GetCell(column.SourceColumnIndex),
+                    formatter,
+                    evaluator).Trim();
+            }
+
+            refundRows.Add(values);
+        }
+
+        return refundRows;
+    }
+
+    private static int AppendRefundRowsToRmaSheet(
+        IReadOnlyList<IReadOnlyDictionary<string, string>> refundRows,
+        ISheet targetSheet,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
+    {
+        var targetHeaders = RmaColumnMap.Values.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var headerRowIndex = FindHeaderRow(targetSheet, formatter);
+        IRow headerRow;
+        if (headerRowIndex < 0)
+        {
+            headerRowIndex = 0;
+            headerRow = targetSheet.GetRow(headerRowIndex) ?? targetSheet.CreateRow(headerRowIndex);
+            for (var columnIndex = 0; columnIndex < targetHeaders.Count; columnIndex++)
+            {
+                headerRow.CreateCell(columnIndex).SetCellValue(targetHeaders[columnIndex]);
+            }
+        }
+        else
+        {
+            headerRow = targetSheet.GetRow(headerRowIndex)
+                ?? throw new InvalidOperationException($"Header row not found in sheet: {targetSheet.SheetName}");
+        }
+
+        var targetHeaderIndex = BuildHeaderIndex(ReadRow(headerRow, formatter));
+        foreach (var header in targetHeaders)
+        {
+            if (targetHeaderIndex.ContainsKey(header))
+            {
+                continue;
+            }
+
+            var columnIndex = targetHeaderIndex.Count == 0
+                ? 0
+                : targetHeaderIndex.Values.Max() + 1;
+            headerRow.CreateCell(columnIndex).SetCellValue(header);
+            targetHeaderIndex[header] = columnIndex;
+        }
+
+        var nextTargetRowIndex = FindNextAppendRowIndex(targetSheet, headerRowIndex, formatter);
+        foreach (var refundRow in refundRows)
+        {
+            var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
+            foreach (var header in targetHeaders)
+            {
+                var value = refundRow.TryGetValue(header, out var cellValue) ? cellValue : string.Empty;
+                SetCellValue(targetRow.CreateCell(targetHeaderIndex[header]), value, cellStyleCache);
+            }
+
+            nextTargetRowIndex++;
+        }
+
+        return refundRows.Count;
+    }
+
+    private static int FindNextAppendRowIndex(ISheet sheet, int headerRowIndex, DataFormatter formatter)
+    {
+        for (var rowIndex = sheet.LastRowNum; rowIndex > headerRowIndex; rowIndex--)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is not null && ReadRow(row, formatter).Any(value => !string.IsNullOrWhiteSpace(value)))
+            {
+                return rowIndex + 1;
+            }
+        }
+
+        return headerRowIndex + 1;
+    }
+
+    private static string BuildRmaMonthSheetName(DateOnly date)
+    {
+        return $"{date.Year % 100}\u5e74{date.Month}\u6708";
+    }
+
     private static ISheet? FindSheet(IWorkbook workbook, string sheetName)
     {
         return FindSheet(workbook, [sheetName]);
@@ -1001,6 +1198,21 @@ public sealed class ExcelImportJob
     private static string NormalizeOrderId(string? value)
     {
         return (value ?? string.Empty).Trim().Trim('\'');
+    }
+
+    private static string FormatCellResolvedValue(
+        ICell? cell,
+        DataFormatter formatter,
+        IFormulaEvaluator evaluator)
+    {
+        if (cell is null)
+        {
+            return string.Empty;
+        }
+
+        return cell.CellType == CellType.Formula
+            ? formatter.FormatCellValue(cell, evaluator)
+            : formatter.FormatCellValue(cell);
     }
 
     private static void CopyFormattedCellValue(

@@ -39,6 +39,51 @@ public sealed class FeishuApiClient
         return await DownloadAttachmentAsync(_options.MappingAttachmentFieldName, processingDate, cancellationToken);
     }
 
+    public async Task<byte[]> DownloadRmaAttachmentAsync(DateOnly processingDate, CancellationToken cancellationToken = default)
+    {
+        return await DownloadAttachmentAsync(_options.RmaAttachmentFieldName, processingDate, cancellationToken);
+    }
+
+    public async Task UploadRmaAttachmentAsync(
+        DateOnly processingDate,
+        string fileName,
+        byte[] fileBytes,
+        CancellationToken cancellationToken = default)
+    {
+        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
+        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
+        var tableId = ResolveTableId()
+            ?? throw new InvalidOperationException("Feishu table id is not configured.");
+        var record = await GetRecordByDateAsync(
+            accessToken,
+            appToken,
+            tableId,
+            _options.RmaAttachmentFieldName,
+            processingDate,
+            cancellationToken);
+        var uploadedFileToken = await UploadBitableAttachmentAsync(
+            accessToken,
+            appToken,
+            fileName,
+            fileBytes,
+            cancellationToken);
+
+        using var request = CreateAuthorizedJsonRequest(
+            HttpMethod.Put,
+            $"{ApiBaseUrl}/bitable/v1/apps/{Uri.EscapeDataString(appToken)}/tables/{Uri.EscapeDataString(tableId)}/records/{Uri.EscapeDataString(record.RecordId)}",
+            accessToken,
+            new
+            {
+                fields = new Dictionary<string, object>
+                {
+                    [_options.RmaAttachmentFieldName] = new[] { new { file_token = uploadedFileToken } }
+                }
+            });
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var _ = await ReadSuccessJsonAsync(response, "Update Feishu RMA attachment field failed", cancellationToken);
+    }
+
     private async Task<byte[]> DownloadAttachmentAsync(
         string attachmentFieldName,
         DateOnly processingDate,
@@ -139,7 +184,7 @@ public sealed class FeishuApiClient
         {
             records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, filter: null, cancellationToken);
             records = records
-                .Where(record => record.TryGetProperty(_options.DateFieldName, out var dateField)
+                .Where(record => record.Fields.TryGetProperty(_options.DateFieldName, out var dateField)
                     && IsSameLocalDate(dateField, processingDate))
                 .ToList();
         }
@@ -157,7 +202,7 @@ public sealed class FeishuApiClient
                 processingDate);
         }
 
-        var fields = records[0];
+        var fields = records[0].Fields;
         if (!fields.TryGetProperty(attachmentFieldName, out var attachmentField)
             || attachmentField.ValueKind != JsonValueKind.Array)
         {
@@ -181,7 +226,59 @@ public sealed class FeishuApiClient
             ?? throw CreateAttachmentFailure("Attachment is missing file_token.");
     }
 
-    private async Task<List<JsonElement>> SearchRecordsAsync(
+    private async Task<FeishuRecord> GetRecordByDateAsync(
+        string accessToken,
+        string appToken,
+        string tableId,
+        string attachmentFieldName,
+        DateOnly processingDate,
+        CancellationToken cancellationToken)
+    {
+        var dateFilter = new
+        {
+            conjunction = "and",
+            conditions = new object[]
+            {
+                new
+                {
+                    field_name = _options.DateFieldName,
+                    @operator = "is",
+                    value = new[]
+                    {
+                        "ExactDate",
+                        GetLocalDateStartUnixMilliseconds(processingDate).ToString(CultureInfo.InvariantCulture)
+                    }
+                }
+            }
+        };
+
+        var records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, dateFilter, cancellationToken);
+        if (records.Count == 0)
+        {
+            records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, filter: null, cancellationToken);
+            records = records
+                .Where(record => record.Fields.TryGetProperty(_options.DateFieldName, out var dateField)
+                    && IsSameLocalDate(dateField, processingDate))
+                .ToList();
+        }
+
+        if (records.Count == 0)
+        {
+            throw CreateAttachmentFailure($"No Feishu record found for date {processingDate:yyyy-MM-dd}.");
+        }
+
+        if (records.Count > 1)
+        {
+            _logger.LogWarning(
+                "Feishu record query returned {RecordCount} records for {ProcessingDate}; using the first record.",
+                records.Count,
+                processingDate);
+        }
+
+        return records[0];
+    }
+
+    private async Task<List<FeishuRecord>> SearchRecordsAsync(
         string accessToken,
         string appToken,
         string tableId,
@@ -189,7 +286,7 @@ public sealed class FeishuApiClient
         object? filter,
         CancellationToken cancellationToken)
     {
-        var records = new List<JsonElement>();
+        var records = new List<FeishuRecord>();
         string? pageToken = null;
 
         do
@@ -239,9 +336,12 @@ public sealed class FeishuApiClient
                 {
                     foreach (var item in items.EnumerateArray())
                     {
-                        if (item.TryGetProperty("fields", out var fields) && fields.ValueKind == JsonValueKind.Object)
+                        if (item.TryGetProperty("record_id", out var recordId)
+                            && recordId.ValueKind == JsonValueKind.String
+                            && item.TryGetProperty("fields", out var fields)
+                            && fields.ValueKind == JsonValueKind.Object)
                         {
-                            records.Add(fields.Clone());
+                            records.Add(new FeishuRecord(recordId.GetString() ?? string.Empty, fields.Clone()));
                         }
                     }
                 }
@@ -263,6 +363,32 @@ public sealed class FeishuApiClient
         while (!string.IsNullOrWhiteSpace(pageToken));
 
         return records;
+    }
+
+    private async Task<string> UploadBitableAttachmentAsync(
+        string accessToken,
+        string appToken,
+        string fileName,
+        byte[] fileBytes,
+        CancellationToken cancellationToken)
+    {
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(fileName, Encoding.UTF8), "file_name");
+        content.Add(new StringContent("bitable_file", Encoding.UTF8), "parent_type");
+        content.Add(new StringContent(appToken, Encoding.UTF8), "parent_node");
+        content.Add(new StringContent(fileBytes.Length.ToString(CultureInfo.InvariantCulture), Encoding.UTF8), "size");
+
+        var fileContent = new ByteArrayContent(fileBytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        content.Add(fileContent, "file", fileName);
+
+        using var request = CreateAuthorizedRequest(HttpMethod.Post, $"{ApiBaseUrl}/drive/v1/medias/upload_all", accessToken);
+        request.Content = content;
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var json = await ReadSuccessJsonAsync(response, "Upload Feishu RMA attachment failed", cancellationToken);
+        var data = json.RootElement.GetProperty("data");
+        return ReadRequiredString(data, "file_token", "uploaded file_token");
     }
 
     private async Task<string> GetTemporaryDownloadUrlAsync(string accessToken, string fileToken, CancellationToken cancellationToken)
@@ -359,6 +485,11 @@ public sealed class FeishuApiClient
         if (json.RootElement.TryGetProperty("code", out var code) && code.GetInt32() != 0)
         {
             var message = TryReadString(json.RootElement, "msg") ?? TryReadString(json.RootElement, "message") ?? body;
+            if (code.GetInt32() == 1061004 && action.Contains("Upload Feishu", StringComparison.OrdinalIgnoreCase))
+            {
+                message = $"{message} Ensure the Feishu app has media upload permission and edit permission on the target bitable/wiki node.";
+            }
+
             throw new FeishuApiException($"{action}: {message}");
         }
 
@@ -374,7 +505,15 @@ public sealed class FeishuApiClient
 
     private static HttpRequestMessage CreateAuthorizedJsonPost(string url, string accessToken, object body)
     {
-        var request = CreateJsonPost(url, body);
+        return CreateAuthorizedJsonRequest(HttpMethod.Post, url, accessToken, body);
+    }
+
+    private static HttpRequestMessage CreateAuthorizedJsonRequest(HttpMethod method, string url, string accessToken, object body)
+    {
+        var request = new HttpRequestMessage(method, url)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+        };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         return request;
     }
@@ -529,4 +668,6 @@ public sealed class FeishuApiClient
         {
         }
     }
+
+    private sealed record FeishuRecord(string RecordId, JsonElement Fields);
 }
