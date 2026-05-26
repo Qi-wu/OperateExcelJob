@@ -31,15 +31,29 @@ public sealed class FeishuApiClient
 
     public async Task<byte[]> DownloadProfitAttachmentAsync(DateOnly processingDate, CancellationToken cancellationToken = default)
     {
+        return await DownloadAttachmentAsync(_options.AttachmentFieldName, processingDate, cancellationToken);
+    }
+
+    public async Task<byte[]> DownloadMappingAttachmentAsync(DateOnly processingDate, CancellationToken cancellationToken = default)
+    {
+        return await DownloadAttachmentAsync(_options.MappingAttachmentFieldName, processingDate, cancellationToken);
+    }
+
+    private async Task<byte[]> DownloadAttachmentAsync(
+        string attachmentFieldName,
+        DateOnly processingDate,
+        CancellationToken cancellationToken)
+    {
         var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
         var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
         var tableId = ResolveTableId()
             ?? throw new InvalidOperationException("Feishu table id is not configured.");
 
-        var fileToken = await GetProfitAttachmentFileTokenAsync(
+        var fileToken = await GetAttachmentFileTokenAsync(
             accessToken,
             appToken,
             tableId,
+            attachmentFieldName,
             processingDate,
             cancellationToken);
 
@@ -94,10 +108,11 @@ public sealed class FeishuApiClient
         return ReadRequiredString(node, "obj_token", "wiki node obj_token");
     }
 
-    private async Task<string> GetProfitAttachmentFileTokenAsync(
+    private async Task<string> GetAttachmentFileTokenAsync(
         string accessToken,
         string appToken,
         string tableId,
+        string attachmentFieldName,
         DateOnly processingDate,
         CancellationToken cancellationToken)
     {
@@ -119,10 +134,10 @@ public sealed class FeishuApiClient
             }
         };
 
-        var records = await SearchRecordsAsync(accessToken, appToken, tableId, dateFilter, cancellationToken);
+        var records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, dateFilter, cancellationToken);
         if (records.Count == 0)
         {
-            records = await SearchRecordsAsync(accessToken, appToken, tableId, filter: null, cancellationToken);
+            records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, filter: null, cancellationToken);
             records = records
                 .Where(record => record.TryGetProperty(_options.DateFieldName, out var dateField)
                     && IsSameLocalDate(dateField, processingDate))
@@ -143,15 +158,15 @@ public sealed class FeishuApiClient
         }
 
         var fields = records[0];
-        if (!fields.TryGetProperty(_options.AttachmentFieldName, out var attachmentField)
+        if (!fields.TryGetProperty(attachmentFieldName, out var attachmentField)
             || attachmentField.ValueKind != JsonValueKind.Array)
         {
-            throw CreateAttachmentFailure($"Field {_options.AttachmentFieldName} has no attachment.");
+            throw CreateAttachmentFailure($"Field {attachmentFieldName} has no attachment.");
         }
 
         if (attachmentField.GetArrayLength() != 1)
         {
-            throw CreateAttachmentFailure($"Field {_options.AttachmentFieldName} attachment count is {attachmentField.GetArrayLength()}.");
+            throw CreateAttachmentFailure($"Field {attachmentFieldName} attachment count is {attachmentField.GetArrayLength()}.");
         }
 
         var attachment = attachmentField[0];
@@ -170,6 +185,7 @@ public sealed class FeishuApiClient
         string accessToken,
         string appToken,
         string tableId,
+        string attachmentFieldName,
         object? filter,
         CancellationToken cancellationToken)
     {
@@ -192,7 +208,7 @@ public sealed class FeishuApiClient
 
             var body = new Dictionary<string, object>
             {
-                ["field_names"] = new[] { _options.DateFieldName, _options.AttachmentFieldName }
+                ["field_names"] = new[] { _options.DateFieldName, attachmentFieldName }
             };
             if (filter is not null)
             {

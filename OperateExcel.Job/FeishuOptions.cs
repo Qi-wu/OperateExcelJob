@@ -9,8 +9,10 @@ public sealed class FeishuOptions
     public string? BitableAppToken { get; set; }
     public string? TableId { get; set; }
     public string? ViewId { get; set; }
-    public string DateFieldName { get; set; } = "日期";
-    public string AttachmentFieldName { get; set; } = "损益表";
+    public string DateFieldName { get; set; } = "\u65e5\u671f";
+    public string AttachmentFieldName { get; set; } = "\u635f\u76ca\u8868";
+    public string MappingAttachmentFieldName { get; set; } = "\u6620\u5c04\u8868";
     public string SourceSheetName { get; set; } = "B2BOL";
-    public string TargetSheetName { get; set; } = "B2B（ol)";
+    public string TargetSheetName { get; set; } = "B2B\uff08ol)";
+    public string MappingTargetSheetName { get; set; } = "\u6620\u5c04\u8868";
 }

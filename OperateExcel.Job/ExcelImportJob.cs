@@ -13,6 +13,7 @@ public sealed class ExcelImportJob
     private const string AdvertisingSheetName = "\u5e7f\u544a";
     private const string FulfillmentSheetName = "fulfillment";
     private const string PaymentsSheetName = "payments";
+    private const string MappingSheetName = "\u6620\u5c04\u8868";
     private const string FulfillmentTemplateSheetName = "\u6a21\u7248F";
     private const string PaymentTemplateSheetName = "\u6a21\u677fP";
     private const string WaitingOrderFileName = "\u7b49\u5f85\u4e2d\u7684\u8ba2\u5355\u53f7.xlsx";
@@ -57,6 +58,23 @@ public sealed class ExcelImportJob
             ["Yue an Company"] = "AN",
             ["Dux"] = "DUX",
             ["DUX"] = "DUX"
+        };
+
+    private static readonly IReadOnlyList<MappingSourceSheet> MappingSourceSheets =
+    [
+        new("\u65e0\u5fe7\u65e0\u8651", ["WUYOU", "\u65e0\u5fe7\u65e0\u8651"]),
+        new("OYU", ["OYUMOENTS \u6620\u5c04", "OYUMOENTS\u6620\u5c04", "OYUMOENTS \u6620\u5c04\u8868", "OYUMOENTS\u6620\u5c04\u8868"]),
+        new("AN", ["AN\u6620\u5c04\u8868", "AN \u6620\u5c04\u8868", "AN\u6620\u5c04", "AN \u6620\u5c04"]),
+        new("DUX", ["DUX \u6620\u5c04", "DUX\u6620\u5c04", "DUX \u6620\u5c04\u8868", "DUX\u6620\u5c04\u8868"])
+    ];
+
+    private static readonly IReadOnlySet<string> MappingImportHeaders =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "\u5e73\u53f0SKU",
+            "Asin",
+            "B2B Item Code",
+            "\u8fd0\u8425"
         };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> SheetHeaderAliases =
@@ -144,6 +162,7 @@ public sealed class ExcelImportJob
         var cellStyleCache = new CellStyleCache(workbook);
 
         ImportB2BOlFromFeishu(workbook, processingDate, formatter, cellStyleCache, messages);
+        ImportMappingFromFeishu(workbook, processingDate, formatter, cellStyleCache, messages);
 
         var importedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
@@ -313,6 +332,47 @@ public sealed class ExcelImportJob
 
             var importedRows = CopyTableDataToSheet(sourceTable, targetSheet, formatter, cellStyleCache);
             messages.Add($"Imported {importedRows} rows from Feishu sheet {_feishuOptions.SourceSheetName} to sheet {_feishuOptions.TargetSheetName}.");
+        }
+        finally
+        {
+            sourceWorkbook.Close();
+        }
+    }
+
+    private void ImportMappingFromFeishu(
+        IWorkbook targetWorkbook,
+        DateOnly processingDate,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache,
+        ICollection<string> messages)
+    {
+        if (!_feishuOptions.Enabled)
+        {
+            messages.Add("Skipped Feishu mapping import: Feishu import is disabled.");
+            _logger.LogWarning("Skipped Feishu mapping import because Feishu import is disabled.");
+            return;
+        }
+
+        if (!_feishuClient.IsConfigured)
+        {
+            throw new InvalidOperationException("Feishu mapping import is enabled, but AppId/AppSecret or table configuration is incomplete.");
+        }
+
+        var attachmentBytes = _feishuClient
+            .DownloadMappingAttachmentAsync(processingDate)
+            .GetAwaiter()
+            .GetResult();
+
+        using var stream = new MemoryStream(attachmentBytes);
+        var sourceWorkbook = WorkbookFactory.Create(stream);
+        try
+        {
+            var targetSheet = FindSheet(targetWorkbook, _feishuOptions.MappingTargetSheetName)
+                ?? FindSheet(targetWorkbook, MappingSheetName)
+                ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.MappingTargetSheetName}");
+
+            var importedRows = CopyMappingSheetsToTarget(sourceWorkbook, targetSheet, formatter, cellStyleCache);
+            messages.Add($"Imported {importedRows} rows from Feishu mapping attachment to sheet {targetSheet.SheetName}.");
         }
         finally
         {
@@ -719,24 +779,117 @@ public sealed class ExcelImportJob
         return sourceTable.Rows.Count;
     }
 
-    private static ISheet? FindSheet(IWorkbook workbook, string sheetName)
+    private static int CopyMappingSheetsToTarget(
+        IWorkbook sourceWorkbook,
+        ISheet targetSheet,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
     {
-        var sheet = workbook.GetSheet(sheetName);
-        if (sheet is not null)
+        var targetHeaderRowIndex = FindHeaderRow(targetSheet, formatter);
+        if (targetHeaderRowIndex < 0)
         {
-            return sheet;
+            throw new InvalidOperationException($"No header row found in sheet: {targetSheet.SheetName}");
         }
 
-        for (var i = 0; i < workbook.NumberOfSheets; i++)
+        var targetHeaders = ReadRow(targetSheet.GetRow(targetHeaderRowIndex), formatter)
+            .Select(DelimitedTableReader.CleanHeader)
+            .ToList();
+        var targetHeaderIndex = BuildHeaderIndex(targetHeaders);
+        var accountColumnIndex = ResolveRequiredColumn(targetHeaderIndex, "\u8d26\u53f7", targetSheet.SheetName);
+        var copyColumns = MappingImportHeaders
+            .Select(header => new CopyColumn(-1, ResolveRequiredColumn(targetHeaderIndex, header, targetSheet.SheetName), header))
+            .ToList();
+
+        ClearWritableCells(
+            targetSheet,
+            targetHeaderRowIndex,
+            copyColumns.Select(column => column.TargetColumnIndex).Concat([accountColumnIndex]));
+
+        var nextTargetRowIndex = targetHeaderRowIndex + 1;
+        foreach (var sourceSheet in MappingSourceSheets)
         {
-            sheet = workbook.GetSheetAt(i);
-            if (string.Equals(sheet.SheetName, sheetName, StringComparison.OrdinalIgnoreCase))
+            var matchedSheet = FindSheet(sourceWorkbook, sourceSheet.SheetNameCandidates)
+                ?? throw new InvalidOperationException(
+                    $"Sheet not found in source workbook. Expected one of: {string.Join(", ", sourceSheet.SheetNameCandidates)}. Actual sheets: {string.Join(", ", ReadSheetNames(sourceWorkbook))}");
+
+            var sourceTable = ReadExcelTable(sourceWorkbook, matchedSheet, formatter);
+            var sourceHeaderIndex = BuildHeaderIndex(sourceTable.Headers);
+            var resolvedColumns = copyColumns
+                .Select(column => column with
+                {
+                    SourceColumnIndex = ResolveRequiredColumn(sourceHeaderIndex, column.Header, matchedSheet.SheetName)
+                })
+                .ToList();
+
+            foreach (var sourceRow in sourceTable.Rows)
+            {
+                var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
+                foreach (var column in resolvedColumns)
+                {
+                    var value = column.SourceColumnIndex < sourceRow.Count
+                        ? sourceRow[column.SourceColumnIndex]
+                        : string.Empty;
+
+                    SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
+                }
+
+                SetCellValue(targetRow.CreateCell(accountColumnIndex), sourceSheet.AccountName, cellStyleCache);
+                nextTargetRowIndex++;
+            }
+        }
+
+        return nextTargetRowIndex - targetHeaderRowIndex - 1;
+    }
+
+    private static ISheet? FindSheet(IWorkbook workbook, string sheetName)
+    {
+        return FindSheet(workbook, [sheetName]);
+    }
+
+    private static ISheet? FindSheet(IWorkbook workbook, IReadOnlyList<string> sheetNameCandidates)
+    {
+        foreach (var sheetName in sheetNameCandidates)
+        {
+            var sheet = workbook.GetSheet(sheetName);
+            if (sheet is not null)
             {
                 return sheet;
             }
         }
 
+        foreach (var sheetName in sheetNameCandidates)
+        {
+            var normalizedCandidate = NormalizeSheetName(sheetName);
+            for (var i = 0; i < workbook.NumberOfSheets; i++)
+            {
+                var sheet = workbook.GetSheetAt(i);
+                if (string.Equals(NormalizeSheetName(sheet.SheetName), normalizedCandidate, StringComparison.OrdinalIgnoreCase))
+                {
+                    return sheet;
+                }
+            }
+        }
+
         return null;
+    }
+
+    private static IReadOnlyList<string> ReadSheetNames(IWorkbook workbook)
+    {
+        var sheetNames = new List<string>();
+        for (var i = 0; i < workbook.NumberOfSheets; i++)
+        {
+            sheetNames.Add(workbook.GetSheetAt(i).SheetName);
+        }
+
+        return sheetNames;
+    }
+
+    private static string NormalizeSheetName(string sheetName)
+    {
+        var normalized = new string(sheetName.Where(character => !char.IsWhiteSpace(character)).ToArray());
+        return normalized.EndsWith("\u8868", StringComparison.OrdinalIgnoreCase)
+            ? normalized[..^1]
+            : normalized;
     }
 
     private static int FindHeaderRow(ISheet sheet, DataFormatter formatter)
@@ -1167,6 +1320,8 @@ public sealed class ExcelImportJob
     }
 
     private readonly record struct ParsedNumericCell(double Value, string? FormatKey);
+
+    private sealed record MappingSourceSheet(string AccountName, IReadOnlyList<string> SheetNameCandidates);
 
     private readonly record struct CopyColumn(int SourceColumnIndex, int TargetColumnIndex, string Header);
 
