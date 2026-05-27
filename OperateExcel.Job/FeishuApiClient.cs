@@ -10,6 +10,7 @@ public sealed class FeishuApiClient
 {
     private const string ApiBaseUrl = "https://open.feishu.cn/open-apis";
     private const string AttachmentReadFailed = "\u9644\u4ef6\u8bfb\u53d6\u5931\u8d25";
+    private static readonly TimeSpan ResponseBodyReadTimeout = TimeSpan.FromSeconds(30);
 
     private readonly HttpClient _httpClient;
     private readonly FeishuOptions _options;
@@ -44,44 +45,54 @@ public sealed class FeishuApiClient
         return await DownloadAttachmentAsync(_options.RmaAttachmentFieldName, processingDate, cancellationToken);
     }
 
+    public async Task<byte[]> DownloadDailyReportAttachmentAsync(DateOnly reportDate, CancellationToken cancellationToken = default)
+    {
+        return await DownloadAttachmentAsync(_options.DailyReportAttachmentFieldName, reportDate, cancellationToken);
+    }
+
+    public async Task UploadDailyReportAttachmentAndMarkCompletedAsync(
+        DateOnly reportDate,
+        string fileName,
+        byte[] fileBytes,
+        CancellationToken cancellationToken = default)
+    {
+        var fields = new Dictionary<string, object>
+        {
+            [_options.DailyReportAttachmentFieldName] = await BuildUploadedAttachmentFieldValueAsync(
+                fileName,
+                fileBytes,
+                cancellationToken),
+            [_options.CompletionFieldName] = _options.CompletionValue
+        };
+
+        await UpdateRecordFieldsByDateAsync(
+            reportDate,
+            _options.DailyReportAttachmentFieldName,
+            fields,
+            "Update Feishu daily report fields failed",
+            cancellationToken);
+    }
+
     public async Task UploadRmaAttachmentAsync(
         DateOnly processingDate,
         string fileName,
         byte[] fileBytes,
         CancellationToken cancellationToken = default)
     {
-        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
-        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
-        var tableId = ResolveTableId()
-            ?? throw new InvalidOperationException("Feishu table id is not configured.");
-        var record = await GetRecordByDateAsync(
-            accessToken,
-            appToken,
-            tableId,
-            _options.RmaAttachmentFieldName,
+        var fields = new Dictionary<string, object>
+        {
+            [_options.RmaAttachmentFieldName] = await BuildUploadedAttachmentFieldValueAsync(
+                fileName,
+                fileBytes,
+                cancellationToken)
+        };
+
+        await UpdateRecordFieldsByDateAsync(
             processingDate,
+            _options.RmaAttachmentFieldName,
+            fields,
+            "Update Feishu RMA attachment field failed",
             cancellationToken);
-        var uploadedFileToken = await UploadBitableAttachmentAsync(
-            accessToken,
-            appToken,
-            fileName,
-            fileBytes,
-            cancellationToken);
-
-        using var request = CreateAuthorizedJsonRequest(
-            HttpMethod.Put,
-            $"{ApiBaseUrl}/bitable/v1/apps/{Uri.EscapeDataString(appToken)}/tables/{Uri.EscapeDataString(tableId)}/records/{Uri.EscapeDataString(record.RecordId)}",
-            accessToken,
-            new
-            {
-                fields = new Dictionary<string, object>
-                {
-                    [_options.RmaAttachmentFieldName] = new[] { new { file_token = uploadedFileToken } }
-                }
-            });
-
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        using var _ = await ReadSuccessJsonAsync(response, "Update Feishu RMA attachment field failed", cancellationToken);
     }
 
     private async Task<byte[]> DownloadAttachmentAsync(
@@ -107,6 +118,54 @@ public sealed class FeishuApiClient
         using var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+    }
+
+    private async Task<object> BuildUploadedAttachmentFieldValueAsync(
+        string fileName,
+        byte[] fileBytes,
+        CancellationToken cancellationToken)
+    {
+        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
+        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
+        var uploadedFileToken = await UploadBitableAttachmentAsync(
+            accessToken,
+            appToken,
+            fileName,
+            fileBytes,
+            cancellationToken);
+
+        return new[] { new { file_token = uploadedFileToken } };
+    }
+
+    private async Task UpdateRecordFieldsByDateAsync(
+        DateOnly recordDate,
+        string lookupFieldName,
+        IReadOnlyDictionary<string, object> fields,
+        string errorMessage,
+        CancellationToken cancellationToken)
+    {
+        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
+        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
+        var tableId = ResolveTableId()
+            ?? throw new InvalidOperationException("Feishu table id is not configured.");
+        var record = await GetRecordByDateAsync(
+            accessToken,
+            appToken,
+            tableId,
+            lookupFieldName,
+            recordDate,
+            cancellationToken);
+
+        var request = CreateAuthorizedJsonRequest(
+            HttpMethod.Put,
+            $"{ApiBaseUrl}/bitable/v1/apps/{Uri.EscapeDataString(appToken)}/tables/{Uri.EscapeDataString(tableId)}/records/{Uri.EscapeDataString(record.RecordId)}",
+            accessToken,
+            new { fields });
+
+        var response = await _httpClient.SendAsync(request, cancellationToken);
+        var body = await ReadResponseBodyAsync(response, errorMessage, cancellationToken);
+        EnsureSuccessJson(response, body, errorMessage);
+        _logger.LogInformation("Updated Feishu record {RecordId} for {RecordDate:yyyy-MM-dd}.", record.RecordId, recordDate);
     }
 
     private async Task<string> GetTenantAccessTokenAsync(CancellationToken cancellationToken)
@@ -475,13 +534,49 @@ public sealed class FeishuApiClient
 
     private async Task<JsonDocument> ReadSuccessJsonAsync(HttpResponseMessage response, string action, CancellationToken cancellationToken)
     {
-        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        var body = await ReadResponseBodyAsync(response, action, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             throw new FeishuApiException($"{action}: HTTP {(int)response.StatusCode}, {body}");
         }
 
         var json = JsonDocument.Parse(body);
+        EnsureSuccessJson(json, action, body);
+        return json;
+    }
+
+    private static void EnsureSuccessJson(HttpResponseMessage response, string body, string action)
+    {
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new FeishuApiException($"{action}: HTTP {(int)response.StatusCode}, {body}");
+        }
+
+        using var json = JsonDocument.Parse(body);
+        EnsureSuccessJson(json, action, body);
+    }
+
+    private async Task<string> ReadResponseBodyAsync(
+        HttpResponseMessage response,
+        string action,
+        CancellationToken cancellationToken)
+    {
+        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            timeout.CancelAfter(ResponseBodyReadTimeout);
+            try
+            {
+                return await response.Content.ReadAsStringAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new FeishuApiException($"{action}: timed out reading response body after {ResponseBodyReadTimeout.TotalSeconds:N0} seconds.");
+            }
+        }
+    }
+
+    private static void EnsureSuccessJson(JsonDocument json, string action, string body)
+    {
         if (json.RootElement.TryGetProperty("code", out var code) && code.GetInt32() != 0)
         {
             var message = TryReadString(json.RootElement, "msg") ?? TryReadString(json.RootElement, "message") ?? body;
@@ -492,8 +587,6 @@ public sealed class FeishuApiClient
 
             throw new FeishuApiException($"{action}: {message}");
         }
-
-        return json;
     }
 
     private static HttpRequestMessage CreateAuthorizedRequest(HttpMethod method, string url, string accessToken)
