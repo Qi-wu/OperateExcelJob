@@ -26,6 +26,7 @@ public sealed class ExcelImportJob
     private const int FulfillmentSummaryStartRowIndex = 1334; // Excel row 1335.
     private const int FulfillmentSummaryStartColumnIndex = 2; // Excel column C.
     private const int FulfillmentSummaryColumnCount = 9;
+    private static readonly short WaitingOrderFontColorIndex = IndexedColors.Red.Index;
     private const int PaymentStoreSummaryStartRowIndex = 1500; // Excel row 1501.
     private const int PaymentStoreSummaryStartColumnIndex = 2; // Excel column C.
     private const int PaymentStoreSummaryColumnCount = 5;
@@ -1460,13 +1461,14 @@ public sealed class ExcelImportJob
 
     private static TableData ReadExcelTable(IWorkbook workbook, ISheet sheet, DataFormatter formatter)
     {
+        var evaluator = workbook.GetCreationHelper().CreateFormulaEvaluator();
         var headerRowIndex = FindHeaderRow(sheet, formatter);
         if (headerRowIndex < 0)
         {
             return new TableData([], []);
         }
 
-        var headers = ReadRow(sheet.GetRow(headerRowIndex), formatter)
+        var headers = ReadRow(sheet.GetRow(headerRowIndex), formatter, evaluator: evaluator)
             .Select(DelimitedTableReader.CleanHeader)
             .ToList();
 
@@ -1479,7 +1481,7 @@ public sealed class ExcelImportJob
                 continue;
             }
 
-            var values = ReadRow(row, formatter, headers.Count);
+            var values = ReadRow(row, formatter, headers.Count, evaluator);
             if (values.Any(value => !string.IsNullOrWhiteSpace(value)))
             {
                 rows.Add(values);
@@ -1798,13 +1800,20 @@ public sealed class ExcelImportJob
         return -1;
     }
 
-    private static IReadOnlyList<string> ReadRow(IRow row, DataFormatter formatter, int? maxColumns = null)
+    private static IReadOnlyList<string> ReadRow(
+        IRow row,
+        DataFormatter formatter,
+        int? maxColumns = null,
+        IFormulaEvaluator? evaluator = null)
     {
         var columnCount = maxColumns ?? row.LastCellNum;
         var values = new List<string>();
         for (var columnIndex = 0; columnIndex < columnCount; columnIndex++)
         {
-            values.Add(formatter.FormatCellValue(row.GetCell(columnIndex)).Trim());
+            var cell = row.GetCell(columnIndex);
+            values.Add(evaluator is not null && cell?.CellType == CellType.Formula
+                ? formatter.FormatCellValue(cell, evaluator).Trim()
+                : formatter.FormatCellValue(cell).Trim());
         }
 
         return values;
@@ -1964,7 +1973,38 @@ public sealed class ExcelImportJob
         }
 
         var font = workbook.GetFontAt(cell.CellStyle.FontIndex);
-        return font.Color == IndexedColors.Red.Index;
+        if (font.Color == WaitingOrderFontColorIndex)
+        {
+            return true;
+        }
+
+        var color = font.GetType().GetMethod("GetXSSFColor", Type.EmptyTypes)?.Invoke(font, null)
+            ?? font.GetType().GetProperty("XSSFColor")?.GetValue(font);
+
+        return IsRedRgbColor(ReadColorBytes(color, "RGB"))
+            || IsRedRgbColor(ReadColorBytes(color, "ARGB"));
+    }
+
+    private static byte[]? ReadColorBytes(object? color, string propertyName)
+    {
+        var value = color?.GetType().GetProperty(propertyName)?.GetValue(color);
+        return value switch
+        {
+            byte[] bytes => bytes,
+            sbyte[] signedBytes => signedBytes.Select(item => unchecked((byte)item)).ToArray(),
+            _ => null
+        };
+    }
+
+    private static bool IsRedRgbColor(byte[]? bytes)
+    {
+        if (bytes is null || bytes.Length < 3)
+        {
+            return false;
+        }
+
+        var offset = bytes.Length - 3;
+        return bytes[offset] >= 240 && bytes[offset + 1] <= 32 && bytes[offset + 2] <= 32;
     }
 
     private static void MarkWorkbookForFormulaRecalculation(IWorkbook workbook)
@@ -2270,7 +2310,7 @@ public sealed class ExcelImportJob
             }
 
             var font = _workbook.CreateFont();
-            font.Color = IndexedColors.Red.Index;
+            font.Color = WaitingOrderFontColorIndex;
             style.SetFont(font);
             _redFontStyles.Add(baseStyleIndex, style);
             return style;
