@@ -4,7 +4,7 @@
 
 ## What it imports
 
-- `B2B（ol)` sheet is filled first from the previous day's Feishu bitable attachment `损益表`.
+- `B2B（ol)` sheet is filled first from the processing date folder's Excel file whose name contains `产品信息下载_基础`.
 
 - `fulfillment` sheet reads store `.txt` files.
 - `payments` sheet reads store `.csv` files.
@@ -30,7 +30,7 @@ Use `--date=yyyy-MM-dd` only for manual backfill.
 
 ## Feishu attachment import
 
-Before importing `fulfillment`, `payments`, and `广告`, the job queries the configured Feishu bitable record whose `日期` field equals the processing date, validates that the `损益表` attachment exists and contains exactly one `.xlsx` file, downloads it, then copies the `B2BOL` sheet into `B2B（ol)` by matching column headers.
+Before importing `fulfillment`, `payments`, and `广告`, the job reads the `产品信息下载_基础` Excel file from the processing date folder and copies its first sheet into `B2B（ol)` by matching column headers.
 
 The `映射表` sheet is filled from the configured Feishu spreadsheet sheets instead of the bitable `映射表` attachment. The importer reads the four sheet URLs in `MappingSpreadsheetSheetUrls`, matches each sheet by its title using the original mapping-sheet name rules, copies `平台SKU`, `Asin`, `B2B Item Code`, and `运营`, then fills the target `账号` column with the original account values.
 

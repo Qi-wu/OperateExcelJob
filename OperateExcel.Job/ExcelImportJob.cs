@@ -20,6 +20,7 @@ public sealed class ExcelImportJob
     private const string SummarySheetName = "\u6c47\u603b";
     private const string StorePersonRelationSheetName = "\u5e97\u94fa\u4eba\u5458\u5173\u7cfb";
     private const string WaitingOrderFileName = "\u7b49\u5f85\u4e2d\u7684\u8ba2\u5355\u53f7.xlsx";
+    private const string B2BOlSourceFileNameKeyword = "\u4ea7\u54c1\u4fe1\u606f\u4e0b\u8f7d_\u57fa\u7840";
     private const string AmazonOrderIdHeader = "amazon-order-id";
     private const string OrderStatusHeader = "order-status";
     private const int FulfillmentCopyStartColumnIndex = 11; // Excel column L.
@@ -309,7 +310,7 @@ public sealed class ExcelImportJob
         var formatter = new DataFormatter();
         var cellStyleCache = new CellStyleCache(workbook);
 
-        ImportB2BOlFromFeishu(workbook, processingDate, formatter, cellStyleCache, messages);
+        ImportB2BOlFromLocalFile(workbook, sourceDirectory, formatter, cellStyleCache, messages);
         ImportMappingFromFeishu(workbook, processingDate, formatter, cellStyleCache, messages);
 
         var importedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
@@ -510,45 +511,20 @@ public sealed class ExcelImportJob
         messages.Add($"Uploaded daily report to Feishu date {processingDate:yyyy-MM-dd} and set {_feishuOptions.CompletionFieldName} to {_feishuOptions.CompletionValue}.");
     }
 
-    private void ImportB2BOlFromFeishu(
+    private void ImportB2BOlFromLocalFile(
         IWorkbook targetWorkbook,
-        DateOnly processingDate,
+        string sourceDirectory,
         DataFormatter formatter,
         CellStyleCache cellStyleCache,
         ICollection<string> messages)
     {
-        if (!_feishuOptions.Enabled)
-        {
-            messages.Add("Skipped Feishu B2B（ol） import: Feishu import is disabled.");
-            _logger.LogWarning("Skipped Feishu B2B（ol） import because Feishu import is disabled.");
-            return;
-        }
+        var sourceFile = FindB2BOlSourceFile(sourceDirectory);
+        var sourceTable = ReadExcelTable(sourceFile, formatter);
+        var targetSheet = FindSheet(targetWorkbook, _feishuOptions.TargetSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.TargetSheetName}");
 
-        if (!_feishuClient.IsConfigured)
-        {
-            throw new InvalidOperationException("Feishu B2B（ol） import is enabled, but AppId/AppSecret or table configuration is incomplete.");
-        }
-
-        var attachmentBytes = _feishuClient
-            .DownloadProfitAttachmentAsync(processingDate)
-            .GetAwaiter()
-            .GetResult();
-
-        using var stream = new MemoryStream(attachmentBytes);
-        var sourceWorkbook = WorkbookFactory.Create(stream);
-        try
-        {
-            var sourceTable = ReadExcelTable(sourceWorkbook, _feishuOptions.SourceSheetName, formatter);
-            var targetSheet = FindSheet(targetWorkbook, _feishuOptions.TargetSheetName)
-                ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.TargetSheetName}");
-
-            var importedRows = CopyTableDataToSheet(sourceTable, targetSheet, formatter, cellStyleCache);
-            messages.Add($"Imported {importedRows} rows from Feishu sheet {_feishuOptions.SourceSheetName} to sheet {_feishuOptions.TargetSheetName}.");
-        }
-        finally
-        {
-            sourceWorkbook.Close();
-        }
+        var importedRows = CopyTableDataToSheet(sourceTable, targetSheet, formatter, cellStyleCache);
+        messages.Add($"Imported {importedRows} rows from local file {Path.GetFileName(sourceFile)} to sheet {_feishuOptions.TargetSheetName}.");
     }
 
     private void ImportMappingFromFeishu(
@@ -2575,6 +2551,30 @@ public sealed class ExcelImportJob
         return StoreAccountNames.TryGetValue(storeName, out var accountName)
             ? accountName
             : storeName;
+    }
+
+    private static string FindB2BOlSourceFile(string sourceDirectory)
+    {
+        var sourceFile = Directory
+            .EnumerateFiles(sourceDirectory, "*", SearchOption.TopDirectoryOnly)
+            .Where(path =>
+                Path.GetFileName(path).Contains(B2BOlSourceFileNameKeyword, StringComparison.OrdinalIgnoreCase)
+                && IsExcelFile(path)
+                && !Path.GetFileName(path).StartsWith("~$", StringComparison.Ordinal))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+
+        return sourceFile
+            ?? throw new FileNotFoundException(
+                $"B2B\uff08ol) source file not found. Expected an Excel file whose name contains '{B2BOlSourceFileNameKeyword}' under {sourceDirectory}.");
+    }
+
+    private static bool IsExcelFile(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return extension.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".xls", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".xlsm", StringComparison.OrdinalIgnoreCase);
     }
 
     private static int ResolveAccountColumnIndex(IReadOnlyList<string> targetHeaders)
