@@ -183,13 +183,26 @@ public sealed class FeishuApiClient
         var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
         var tableId = ResolveTableId()
             ?? throw new InvalidOperationException("Feishu table id is not configured.");
-        var record = await GetRecordByDateAsync(
+        var record = await FindRecordByDateAsync(
             accessToken,
             appToken,
             tableId,
             lookupFieldName,
             recordDate,
             cancellationToken);
+
+        if (record is null)
+        {
+            await CreateRecordFieldsByDateAsync(
+                accessToken,
+                appToken,
+                tableId,
+                recordDate,
+                fields,
+                errorMessage,
+                cancellationToken);
+            return;
+        }
 
         var request = CreateAuthorizedJsonRequest(
             HttpMethod.Put,
@@ -201,6 +214,31 @@ public sealed class FeishuApiClient
         var body = await ReadResponseBodyAsync(response, errorMessage, cancellationToken);
         EnsureSuccessJson(response, body, errorMessage);
         _logger.LogInformation("Updated Feishu record {RecordId} for {RecordDate:yyyy-MM-dd}.", record.RecordId, recordDate);
+    }
+
+    private async Task CreateRecordFieldsByDateAsync(
+        string accessToken,
+        string appToken,
+        string tableId,
+        DateOnly recordDate,
+        IReadOnlyDictionary<string, object> fields,
+        string errorMessage,
+        CancellationToken cancellationToken)
+    {
+        var createFields = new Dictionary<string, object>(fields, StringComparer.OrdinalIgnoreCase)
+        {
+            [_options.DateFieldName] = GetLocalDateStartUnixMilliseconds(recordDate)
+        };
+
+        var request = CreateAuthorizedJsonPost(
+            $"{ApiBaseUrl}/bitable/v1/apps/{Uri.EscapeDataString(appToken)}/tables/{Uri.EscapeDataString(tableId)}/records",
+            accessToken,
+            new { fields = createFields });
+
+        var response = await _httpClient.SendAsync(request, cancellationToken);
+        var body = await ReadResponseBodyAsync(response, errorMessage, cancellationToken);
+        EnsureSuccessJson(response, body, errorMessage);
+        _logger.LogInformation("Created Feishu record for {RecordDate:yyyy-MM-dd}.", recordDate);
     }
 
     private async Task<string> GetTenantAccessTokenAsync(CancellationToken cancellationToken)
@@ -430,6 +468,24 @@ public sealed class FeishuApiClient
         DateOnly processingDate,
         CancellationToken cancellationToken)
     {
+        return await FindRecordByDateAsync(
+            accessToken,
+            appToken,
+            tableId,
+            attachmentFieldName,
+            processingDate,
+            cancellationToken)
+            ?? throw CreateAttachmentFailure($"No Feishu record found for date {processingDate:yyyy-MM-dd}.");
+    }
+
+    private async Task<FeishuRecord?> FindRecordByDateAsync(
+        string accessToken,
+        string appToken,
+        string tableId,
+        string attachmentFieldName,
+        DateOnly processingDate,
+        CancellationToken cancellationToken)
+    {
         var dateFilter = new
         {
             conjunction = "and",
@@ -460,13 +516,13 @@ public sealed class FeishuApiClient
 
         if (records.Count == 0)
         {
-            throw CreateAttachmentFailure($"No Feishu record found for date {processingDate:yyyy-MM-dd}.");
+            return null;
         }
 
         if (records.Count > 1)
         {
             _logger.LogWarning(
-                "Feishu record query returned {RecordCount} records for {ProcessingDate}; using the first record.",
+                "Feishu record query returned {RecordCount} records for {ProcessingDate}; using the first record and not creating a duplicate date row.",
                 records.Count,
                 processingDate);
         }
