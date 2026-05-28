@@ -372,14 +372,9 @@ public sealed class ExcelImportJob
                     .Where(column => column.Header.Length > 0 && column.SourceColumnIndex >= 0)
                     .ToList();
 
-                if (_options.ClearExistingData && nextTargetRowIndex == targetHeaderRowIndex + 1)
+                if (nextTargetRowIndex == targetHeaderRowIndex + 1)
                 {
-                    ClearWritableCells(
-                        targetSheet,
-                        targetHeaderRowIndex,
-                        writableColumns
-                            .Select(column => column.TargetColumnIndex)
-                            .Concat(accountColumnIndex >= 0 ? [accountColumnIndex] : []));
+                    ClearDataRows(targetSheet, targetHeaderRowIndex + 1, targetSheet.LastRowNum, preserveFormulas: true);
                 }
 
                 if (writableColumns.Count == 0)
@@ -776,10 +771,14 @@ public sealed class ExcelImportJob
             .Where(column => column.TargetColumnIndex >= 0 && column.Header.Length > 0)
             .ToList();
 
-        ClearWritableCells(targetSheet, targetHeaderRowIndex, copyColumns.Select(column => column.TargetColumnIndex));
-
         var formulaTemplateRow = targetSheet.GetRow(targetHeaderRowIndex + 1);
         var dataColumnIndexes = copyColumns.Select(column => column.TargetColumnIndex).ToHashSet();
+        ClearTemplateDataRows(
+            targetSheet,
+            targetHeaderRowIndex + 1,
+            FulfillmentSummaryStartRowIndex - 1,
+            targetHeaderRowIndex + 1);
+
         var nextTargetRowIndex = targetHeaderRowIndex + 1;
         for (var rowIndex = sourceHeaderRowIndex + 1; rowIndex <= sourceSheet.LastRowNum; rowIndex++)
         {
@@ -837,10 +836,14 @@ public sealed class ExcelImportJob
                 mapping.Key))
             .ToList();
 
-        ClearWritableCells(targetSheet, targetHeaderRowIndex, copyColumns.Select(column => column.TargetColumnIndex));
-
         var formulaTemplateRow = targetSheet.GetRow(targetHeaderRowIndex + 1);
         var dataColumnIndexes = copyColumns.Select(column => column.TargetColumnIndex).ToHashSet();
+        ClearTemplateDataRows(
+            targetSheet,
+            targetHeaderRowIndex + 1,
+            PaymentStoreSummaryStartRowIndex - 1,
+            targetHeaderRowIndex + 1);
+
         var nextTargetRowIndex = targetHeaderRowIndex + 1;
         for (var rowIndex = sourceHeaderRowIndex + 1; rowIndex <= sourceSheet.LastRowNum; rowIndex++)
         {
@@ -2668,7 +2671,7 @@ public sealed class ExcelImportJob
             throw new InvalidOperationException($"No matching columns for sheet: {targetSheet.SheetName}");
         }
 
-        ClearWritableCells(targetSheet, targetHeaderRowIndex, writableColumns.Select(column => column.TargetColumnIndex));
+        ClearDataRows(targetSheet, targetHeaderRowIndex + 1, targetSheet.LastRowNum, preserveFormulas: true);
 
         var nextTargetRowIndex = targetHeaderRowIndex + 1;
         foreach (var sourceRow in sourceTable.Rows)
@@ -2710,10 +2713,7 @@ public sealed class ExcelImportJob
             .Select(header => new CopyColumn(-1, ResolveRequiredColumn(targetHeaderIndex, header, targetSheet.SheetName), header))
             .ToList();
 
-        ClearWritableCells(
-            targetSheet,
-            targetHeaderRowIndex,
-            copyColumns.Select(column => column.TargetColumnIndex).Concat([accountColumnIndex]));
+        ClearDataRows(targetSheet, targetHeaderRowIndex + 1, targetSheet.LastRowNum, preserveFormulas: true);
 
         var nextTargetRowIndex = targetHeaderRowIndex + 1;
         foreach (var sourceSheet in MappingSourceSheets)
@@ -2772,10 +2772,7 @@ public sealed class ExcelImportJob
             .Select(header => new CopyColumn(-1, ResolveRequiredColumn(targetHeaderIndex, header, targetSheet.SheetName), header))
             .ToList();
 
-        ClearWritableCells(
-            targetSheet,
-            targetHeaderRowIndex,
-            copyColumns.Select(column => column.TargetColumnIndex).Concat([accountColumnIndex]));
+        ClearDataRows(targetSheet, targetHeaderRowIndex + 1, targetSheet.LastRowNum, preserveFormulas: true);
 
         var nextTargetRowIndex = targetHeaderRowIndex + 1;
         foreach (var sourceSheet in MappingSourceSheets)
@@ -3425,10 +3422,14 @@ public sealed class ExcelImportJob
         return ExcelCurrencyFormatRegex.Replace(text, match => match.Groups[1].Value);
     }
 
-    private static void ClearWritableCells(ISheet sheet, int headerRowIndex, IEnumerable<int> writableColumnIndexes)
+    private static void ClearDataRows(ISheet sheet, int startRowIndex, int endRowIndex, bool preserveFormulas)
     {
-        var columns = writableColumnIndexes.Distinct().ToList();
-        for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
+        if (endRowIndex < startRowIndex)
+        {
+            return;
+        }
+
+        for (var rowIndex = startRowIndex; rowIndex <= endRowIndex; rowIndex++)
         {
             var row = sheet.GetRow(rowIndex);
             if (row is null)
@@ -3436,13 +3437,45 @@ public sealed class ExcelImportJob
                 continue;
             }
 
-            foreach (var columnIndex in columns)
+            foreach (var cell in row.Cells.ToList())
             {
-                var cell = row.GetCell(columnIndex);
-                if (cell is not null)
+                if (preserveFormulas && cell.CellType == CellType.Formula)
                 {
-                    row.RemoveCell(cell);
+                    continue;
                 }
+
+                row.RemoveCell(cell);
+            }
+        }
+    }
+
+    private static void ClearTemplateDataRows(
+        ISheet sheet,
+        int startRowIndex,
+        int endRowIndex,
+        int formulaTemplateRowIndex)
+    {
+        if (endRowIndex < startRowIndex)
+        {
+            return;
+        }
+
+        for (var rowIndex = startRowIndex; rowIndex <= Math.Min(endRowIndex, sheet.LastRowNum); rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            foreach (var cell in row.Cells.ToList())
+            {
+                if (rowIndex == formulaTemplateRowIndex && cell.CellType == CellType.Formula)
+                {
+                    continue;
+                }
+
+                row.RemoveCell(cell);
             }
         }
     }
