@@ -18,6 +18,7 @@ public sealed class ExcelImportJob
     private const string FulfillmentTemplateSheetName = "\u6a21\u7248F";
     private const string PaymentTemplateSheetName = "\u6a21\u677fP";
     private const string SummarySheetName = "\u6c47\u603b";
+    private const string StorePersonRelationSheetName = "\u5e97\u94fa\u4eba\u5458\u5173\u7cfb";
     private const string WaitingOrderFileName = "\u7b49\u5f85\u4e2d\u7684\u8ba2\u5355\u53f7.xlsx";
     private const string AmazonOrderIdHeader = "amazon-order-id";
     private const string OrderStatusHeader = "order-status";
@@ -34,6 +35,8 @@ public sealed class ExcelImportJob
     private const int PaymentFirstDailySummaryColumnCount = 10; // Excel columns A:J.
     private const int PaymentSecondDailySummaryStartColumnIndex = 14; // Excel column O.
     private const int PaymentSecondDailySummaryColumnCount = 19; // Excel columns O:AG.
+    private const int StoreDailySummaryStartColumnIndex = 14; // Excel column O.
+    private const int StoreDailySummaryColumnCount = 16; // Excel columns O:AD.
 
     private static readonly IReadOnlyDictionary<string, string> SheetSourceExtensions =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -79,10 +82,45 @@ public sealed class ExcelImportJob
     private static readonly IReadOnlyList<string> FulfillmentSummaryStores =
     [
         "\u65e0\u5fe7\u65e0\u8651",
-        "AN",
         "OYU",
+        "AN",
         "DUX"
     ];
+
+    private static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> StorePeople =
+        new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["\u65e0\u5fe7\u65e0\u8651"] =
+            [
+                "\u83ab\u7f8e\u7389",
+                "\u4e01\u82b3\u82b3",
+                "\u6b27\u9633\u535a\u6587",
+                "\u5176\u4ed6",
+                "\u8bb8\u6893\u6e1d",
+                "\u8c2d\u71b9\u6770"
+            ],
+            ["AN"] =
+            [
+                "\u83ab\u7f8e\u7389",
+                "\u5176\u4ed6",
+                "\u8c2d\u71b9\u6770",
+                "\u6731\u5c0f\u71d5"
+            ],
+            ["OYU"] =
+            [
+                "\u8bb8\u6893\u6e1d",
+                "\u8c2d\u71b9\u6770",
+                "\u674e\u5c0f\u5a49"
+            ],
+            ["DUX"] =
+            [
+                "\u4e01\u82b3\u82b3",
+                "\u6b27\u9633\u535a\u6587",
+                "\u8bb8\u6893\u6e1d",
+                "\u8c2d\u71b9\u6770",
+                "\u5510\u7487\u6dd1"
+            ]
+        };
 
     private static readonly IReadOnlyList<string> FulfillmentSummaryHeaders =
     [
@@ -116,6 +154,26 @@ public sealed class ExcelImportJob
         "payments",
         "Refund",
         "payment\u6ea2\u4ef7"
+    ];
+
+    private static readonly IReadOnlyList<string> StoreDailySummaryHeaders =
+    [
+        "\u65e5\u671f",
+        "\u59d3\u540d",
+        "\u8ba2\u5355",
+        "\u9500\u552e\u603b\u989d",
+        "\u6ea2\u4ef7",
+        "\u5e7f\u544a\u82b1\u8d39",
+        "\u6700\u7ec8\u6ea2\u4ef7",
+        "\u5e7f\u544a\u5360\u6bd4",
+        "\u5229\u6da6\u7387",
+        "Refund",
+        "\u9000\u6b3e\u5360\u6bd4",
+        "payments",
+        "payment\u6ea2\u4ef7",
+        "payment\u6700\u7ec8\u6ea2\u4ef7",
+        "payment\u6bdb\u5229\u6bd4",
+        "\u7d2f\u79efpayments"
     ];
 
     private static readonly IReadOnlyDictionary<string, double> PaymentMonthlyBudgetByPerson =
@@ -594,7 +652,10 @@ public sealed class ExcelImportJob
 
         var copiedFulfillmentRows = CopyFilteredFulfillmentRowsToTemplate(workbook, formatter, cellStyleCache);
         var copiedPaymentRows = CopyOrderPaymentRowsToTemplate(workbook, formatter, cellStyleCache);
+        UpsertStorePersonRelationSheet(workbook, cellStyleCache);
         var generatedFulfillmentSummary = GenerateFulfillmentSummaryTemplates(workbook);
+        var storeDailyMetrics = BuildStoreDailySummaryMetrics(workbook, formatter);
+        var appendedStoreDailySummaryRows = AppendStoreDailySummarySheets(workbook, processingDate, storeDailyMetrics, cellStyleCache);
         var generatedPaymentSummaryBlocks = GeneratePaymentSummaryTemplates(workbook);
         var generatedDailySummaryRows = AppendDailySummaryTemplates(workbook, processingDate, generatedFulfillmentSummary, formatter);
         MarkWorkbookForFormulaRecalculation(workbook);
@@ -602,7 +663,9 @@ public sealed class ExcelImportJob
         messages.Add($"Highlighted {highlightedOrderIds} fulfillment rows from {WaitingOrderFileName}.");
         messages.Add($"Copied {copiedFulfillmentRows} fulfillment rows to sheet {FulfillmentTemplateSheetName}.");
         messages.Add($"Copied {copiedPaymentRows} payment rows to sheet {PaymentTemplateSheetName}.");
+        messages.Add($"Updated sheet {StorePersonRelationSheetName}.");
         messages.Add($"Generated {generatedFulfillmentSummary.BlockCount} fulfillment summary templates from row {FulfillmentSummaryStartRowIndex + 1}.");
+        messages.Add($"Appended {appendedStoreDailySummaryRows} rows to store daily summary sheets.");
         messages.Add($"Generated {generatedPaymentSummaryBlocks} payment summary templates from row {PaymentStoreSummaryStartRowIndex + 1}.");
         messages.Add($"Appended {generatedDailySummaryRows} rows to sheet {SummarySheetName}.");
     }
@@ -902,17 +965,18 @@ public sealed class ExcelImportJob
         }
 
         var firstPersonRowIndex = headerRowIndex + 1;
-        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        var storePeople = ResolveStorePeople(storeName);
+        for (var i = 0; i < storePeople.Count; i++)
         {
             var rowIndex = firstPersonRowIndex + i;
             var row = sheet.GetRow(rowIndex) ?? sheet.CreateRow(rowIndex);
             CopyRowStyle(personStyleRow, row, FulfillmentSummaryStartColumnIndex, startColumnIndex, FulfillmentSummaryColumnCount);
             ApplyGeneratedSummaryStyle(sheet, row, startColumnIndex, FulfillmentSummaryColumnCount, GeneratedSummaryRowKind.Person, GeneratedSummaryBlockKind.FulfillmentStore);
-            SetStringCell(row, startColumnIndex, FulfillmentSummaryPeople[i]);
+            SetStringCell(row, startColumnIndex, storePeople[i]);
             SetStoreSummaryFormulas(row, startColumnIndex, headerRowIndex, storeName);
         }
 
-        var totalRowIndex = firstPersonRowIndex + FulfillmentSummaryPeople.Count;
+        var totalRowIndex = firstPersonRowIndex + storePeople.Count;
         var totalRow = sheet.GetRow(totalRowIndex) ?? sheet.CreateRow(totalRowIndex);
         CopyRowStyle(totalStyleRow, totalRow, FulfillmentSummaryStartColumnIndex, startColumnIndex, FulfillmentSummaryColumnCount);
         ApplyGeneratedSummaryStyle(sheet, totalRow, startColumnIndex, FulfillmentSummaryColumnCount, GeneratedSummaryRowKind.Total, GeneratedSummaryBlockKind.FulfillmentStore);
@@ -920,6 +984,349 @@ public sealed class ExcelImportJob
         SetSumFormulas(totalRow, startColumnIndex, firstPersonRowIndex, totalRowIndex - 1);
 
         return totalRowIndex + 1;
+    }
+
+    private static IReadOnlyList<string> ResolveStorePeople(string storeName)
+    {
+        return StorePeople.TryGetValue(storeName, out var people)
+            ? people
+            : FulfillmentSummaryPeople;
+    }
+
+    private static void UpsertStorePersonRelationSheet(IWorkbook workbook, CellStyleCache cellStyleCache)
+    {
+        var sheet = workbook.GetSheet(StorePersonRelationSheetName)
+            ?? workbook.CreateSheet(StorePersonRelationSheetName);
+
+        for (var rowIndex = 0; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            for (var columnIndex = 0; columnIndex < 2; columnIndex++)
+            {
+                var cell = row.GetCell(columnIndex);
+                if (cell is not null)
+                {
+                    row.RemoveCell(cell);
+                }
+            }
+        }
+
+        var headerRow = sheet.GetRow(0) ?? sheet.CreateRow(0);
+        SetCellValue(headerRow.CreateCell(0), "\u5e97\u94fa", cellStyleCache);
+        SetCellValue(headerRow.CreateCell(1), "\u4eba\u5458", cellStyleCache);
+
+        var nextRowIndex = 1;
+        foreach (var store in FulfillmentSummaryStores)
+        {
+            foreach (var person in ResolveStorePeople(store))
+            {
+                var row = sheet.GetRow(nextRowIndex) ?? sheet.CreateRow(nextRowIndex);
+                SetCellValue(row.CreateCell(0), store, cellStyleCache);
+                SetCellValue(row.CreateCell(1), person, cellStyleCache);
+                nextRowIndex++;
+            }
+        }
+    }
+
+    private static int AppendStoreDailySummarySheets(
+        IWorkbook workbook,
+        DateOnly processingDate,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, DailySummaryMetrics>> storeDailyMetrics,
+        CellStyleCache cellStyleCache)
+    {
+        var appendedRows = 0;
+
+        foreach (var store in FulfillmentSummaryStores)
+        {
+            var storePeople = ResolveStorePeople(store);
+            var targetSheet = FindSheet(workbook, store) ?? workbook.CreateSheet(store);
+            EnsureStoreDailySummaryHeaders(targetSheet, cellStyleCache);
+
+            var nextTargetRowIndex = FindNextAppendRowIndex(
+                targetSheet,
+                PaymentFirstDailySummaryStartColumnIndex,
+                PaymentFirstDailySummaryColumnCount);
+            var nextSummaryRowIndex = FindNextStoreSummaryAppendRowIndex(targetSheet);
+            var templateRow = ResolveStoreDailySummaryTemplateRow(targetSheet, nextSummaryRowIndex);
+
+            foreach (var person in storePeople)
+            {
+                var detailRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
+                CopyRowStyle(templateRow, detailRow, 0, 0, PaymentFirstDailySummaryColumnCount);
+
+                SetDateCell(detailRow, 0, processingDate);
+                SetStringCell(detailRow, 1, person);
+                var metrics = storeDailyMetrics.TryGetValue(store, out var metricsByPerson)
+                    && metricsByPerson.TryGetValue(person, out var personMetrics)
+                        ? personMetrics
+                        : new DailySummaryMetrics();
+                SetDailySummaryMetricCells(detailRow, metrics);
+
+                var summaryRow = targetSheet.GetRow(nextSummaryRowIndex) ?? targetSheet.CreateRow(nextSummaryRowIndex);
+                CopyRowStyle(templateRow, summaryRow, StoreDailySummaryStartColumnIndex, StoreDailySummaryStartColumnIndex, StoreDailySummaryColumnCount);
+                SetDateCell(summaryRow, StoreDailySummaryStartColumnIndex, processingDate);
+                SetStringCell(summaryRow, StoreDailySummaryStartColumnIndex + 1, person);
+                SetStoreDailySummaryFormulaCells(summaryRow);
+
+                nextTargetRowIndex++;
+                nextSummaryRowIndex++;
+                appendedRows++;
+            }
+
+            var totalRow = targetSheet.GetRow(nextSummaryRowIndex) ?? targetSheet.CreateRow(nextSummaryRowIndex);
+            CopyRowStyle(templateRow, totalRow, StoreDailySummaryStartColumnIndex, StoreDailySummaryStartColumnIndex, StoreDailySummaryColumnCount);
+            SetStringCell(totalRow, StoreDailySummaryStartColumnIndex, "\u5408\u8ba1");
+            SetStoreDailySummaryTotalFormulas(
+                totalRow,
+                nextSummaryRowIndex - storePeople.Count,
+                nextSummaryRowIndex - 1);
+            ApplyStoreDailySummaryTotalStyle(targetSheet, totalRow);
+            nextSummaryRowIndex++;
+            ClearBlankStoreDailySummaryTemplateRows(targetSheet, nextSummaryRowIndex);
+        }
+
+        return appendedRows;
+    }
+
+    private static void EnsureStoreDailySummaryHeaders(ISheet sheet, CellStyleCache cellStyleCache)
+    {
+        var headerRow = sheet.GetRow(0) ?? sheet.CreateRow(0);
+        for (var i = 0; i < PaymentDailySummaryHeaders.Count; i++)
+        {
+            var cell = headerRow.GetCell(i);
+            if (cell is null || string.IsNullOrWhiteSpace(cell.ToString()))
+            {
+                SetCellValue(headerRow.CreateCell(i), PaymentDailySummaryHeaders[i], cellStyleCache);
+            }
+        }
+
+        for (var i = 0; i < StoreDailySummaryHeaders.Count; i++)
+        {
+            var columnIndex = StoreDailySummaryStartColumnIndex + i;
+            var cell = headerRow.GetCell(columnIndex);
+            if (cell is null || string.IsNullOrWhiteSpace(cell.ToString()))
+            {
+                SetCellValue(headerRow.CreateCell(columnIndex), StoreDailySummaryHeaders[i], cellStyleCache);
+            }
+        }
+    }
+
+    private static IRow? ResolveStoreDailySummaryTemplateRow(ISheet sheet, int targetRowIndex)
+    {
+        var sameRow = sheet.GetRow(targetRowIndex);
+        if (sameRow is not null && HasFormulaInRange(sameRow, StoreDailySummaryStartColumnIndex, StoreDailySummaryColumnCount))
+        {
+            return sameRow;
+        }
+
+        var previousRow = targetRowIndex > 1 ? sheet.GetRow(targetRowIndex - 1) : null;
+        if (previousRow is not null)
+        {
+            return previousRow;
+        }
+
+        return sheet.GetRow(1);
+    }
+
+    private static int FindNextStoreSummaryAppendRowIndex(ISheet sheet)
+    {
+        for (var rowIndex = sheet.LastRowNum; rowIndex >= 1; rowIndex--)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var dateOrTotal = row.GetCell(StoreDailySummaryStartColumnIndex)?.ToString()?.Trim() ?? string.Empty;
+            var person = row.GetCell(StoreDailySummaryStartColumnIndex + 1)?.ToString()?.Trim() ?? string.Empty;
+            if (person.Length > 0)
+            {
+                return rowIndex + 1;
+            }
+
+            if (string.Equals(dateOrTotal, "\u5408\u8ba1", StringComparison.OrdinalIgnoreCase)
+                && HasStoreSummaryPersonRowBefore(sheet, rowIndex))
+            {
+                return rowIndex + 1;
+            }
+
+            if (dateOrTotal.Length > 0 && !string.Equals(dateOrTotal, "\u5408\u8ba1", StringComparison.OrdinalIgnoreCase))
+            {
+                return rowIndex + 1;
+            }
+        }
+
+        return 1;
+    }
+
+    private static bool HasStoreSummaryPersonRowBefore(ISheet sheet, int rowIndex)
+    {
+        for (var previousRowIndex = rowIndex - 1; previousRowIndex >= 1; previousRowIndex--)
+        {
+            var row = sheet.GetRow(previousRowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var dateOrTotal = row.GetCell(StoreDailySummaryStartColumnIndex)?.ToString()?.Trim() ?? string.Empty;
+            var person = row.GetCell(StoreDailySummaryStartColumnIndex + 1)?.ToString()?.Trim() ?? string.Empty;
+            if (person.Length > 0)
+            {
+                return true;
+            }
+
+            if (dateOrTotal.Length > 0)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasFormulaInRange(IRow row, int startColumnIndex, int columnCount)
+    {
+        for (var columnIndex = startColumnIndex; columnIndex < startColumnIndex + columnCount; columnIndex++)
+        {
+            if (row.GetCell(columnIndex)?.CellType == CellType.Formula)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void SetStoreDailySummaryFormulaCells(IRow row)
+    {
+        var rowNumber = row.RowNum + 1;
+        var dateRef = CellReference(StoreDailySummaryStartColumnIndex, rowNumber);
+        var personRef = CellReference(StoreDailySummaryStartColumnIndex + 1, rowNumber);
+
+        SetFormulaCell(row, 16, $"SUMIFS($C:$C,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetFormulaCell(row, 17, $"SUMIFS($D:$D,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetFormulaCell(row, 18, $"SUMIFS($E:$E,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
+        SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
+        SetFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
+        SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+        SetFormulaCell(row, 29, $"X{rowNumber}+Z{rowNumber}");
+    }
+
+    private static void SetStoreDailySummaryTotalFormulas(IRow row, int firstPersonRowIndex, int lastPersonRowIndex)
+    {
+        var rowNumber = row.RowNum + 1;
+        var firstRowNumber = firstPersonRowIndex + 1;
+        var lastRowNumber = lastPersonRowIndex + 1;
+
+        foreach (var columnIndex in new[] { 16, 17, 18, 19, 23, 25, 26, 27, 29 })
+        {
+            var columnName = ColumnIndexToName(columnIndex);
+            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+        }
+
+        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
+        SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
+        SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+    }
+
+    private static void ApplyStoreDailySummaryTotalStyle(ISheet sheet, IRow totalRow)
+    {
+        var workbook = sheet.Workbook;
+        var titleRow = sheet.GetRow(0);
+        var titleCell = titleRow?.GetCell(StoreDailySummaryStartColumnIndex);
+        var totalStyle = workbook.CreateCellStyle();
+        if (titleCell is not null)
+        {
+            totalStyle.CloneStyleFrom(titleCell.CellStyle);
+        }
+
+        totalStyle.Alignment = HorizontalAlignment.Center;
+        totalStyle.VerticalAlignment = VerticalAlignment.Center;
+
+        var font = workbook.CreateFont();
+        if (titleCell is not null)
+        {
+            var titleFont = workbook.GetFontAt(titleCell.CellStyle.FontIndex);
+            font.FontName = titleFont.FontName;
+            font.FontHeightInPoints = titleFont.FontHeightInPoints;
+            font.Color = titleFont.Color;
+            font.IsBold = true;
+        }
+        else
+        {
+            font.IsBold = true;
+        }
+
+        totalStyle.SetFont(font);
+
+        for (var columnIndex = StoreDailySummaryStartColumnIndex;
+             columnIndex < StoreDailySummaryStartColumnIndex + StoreDailySummaryColumnCount;
+             columnIndex++)
+        {
+            var cell = totalRow.GetCell(columnIndex) ?? totalRow.CreateCell(columnIndex);
+            cell.CellStyle = totalStyle;
+        }
+
+        MergeStoreDailySummaryTotalLabelCells(sheet, totalRow.RowNum);
+    }
+
+    private static void MergeStoreDailySummaryTotalLabelCells(ISheet sheet, int rowIndex)
+    {
+        var region = new NPOI.SS.Util.CellRangeAddress(
+            rowIndex,
+            rowIndex,
+            StoreDailySummaryStartColumnIndex,
+            StoreDailySummaryStartColumnIndex + 1);
+
+        RemoveOverlappingMergedRegions(sheet, region);
+        sheet.AddMergedRegion(region);
+    }
+
+    private static void ClearBlankStoreDailySummaryTemplateRows(ISheet sheet, int startRowIndex)
+    {
+        for (var rowIndex = startRowIndex; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var date = row.GetCell(StoreDailySummaryStartColumnIndex)?.ToString()?.Trim() ?? string.Empty;
+            var person = row.GetCell(StoreDailySummaryStartColumnIndex + 1)?.ToString()?.Trim() ?? string.Empty;
+            if (person.Length > 0
+                || (date.Length > 0 && !string.Equals(date, "\u5408\u8ba1", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            for (var columnIndex = StoreDailySummaryStartColumnIndex;
+                 columnIndex < StoreDailySummaryStartColumnIndex + StoreDailySummaryColumnCount;
+                 columnIndex++)
+            {
+                var cell = row.GetCell(columnIndex);
+                if (cell is not null)
+                {
+                    row.RemoveCell(cell);
+                }
+            }
+        }
     }
 
     private static void CreateAllStoreSummaryTemplate(
@@ -1310,6 +1717,31 @@ public sealed class ExcelImportJob
         return metricsByPerson;
     }
 
+    private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, DailySummaryMetrics>> BuildStoreDailySummaryMetrics(
+        IWorkbook workbook,
+        DataFormatter formatter)
+    {
+        var metricsByStore = FulfillmentSummaryStores.ToDictionary(
+            store => store,
+            store => (IDictionary<string, DailySummaryMetrics>)ResolveStorePeople(store).ToDictionary(
+                person => person,
+                _ => new DailySummaryMetrics(),
+                StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
+
+        var skuMappings = ReadSkuMappings(workbook, formatter);
+        var b2bCosts = ReadB2BCosts(workbook, formatter);
+
+        AddStoreFulfillmentMetrics(workbook, formatter, skuMappings, b2bCosts, metricsByStore);
+        AddStoreAdvertisingMetrics(workbook, formatter, skuMappings, metricsByStore);
+        AddStorePaymentMetrics(workbook, formatter, skuMappings, b2bCosts, metricsByStore);
+
+        return metricsByStore.ToDictionary(
+            store => store.Key,
+            store => (IReadOnlyDictionary<string, DailySummaryMetrics>)new Dictionary<string, DailySummaryMetrics>(store.Value, StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     private static Dictionary<string, SkuMapping> ReadSkuMappings(IWorkbook workbook, DataFormatter formatter)
     {
         var sheet = workbook.GetSheet(MappingSheetName)
@@ -1565,6 +1997,209 @@ public sealed class ExcelImportJob
         }
     }
 
+    private static void AddStoreFulfillmentMetrics(
+        IWorkbook workbook,
+        DataFormatter formatter,
+        IReadOnlyDictionary<string, SkuMapping> skuMappings,
+        IReadOnlyDictionary<string, double> b2bCosts,
+        IReadOnlyDictionary<string, IDictionary<string, DailySummaryMetrics>> metricsByStore)
+    {
+        var sheet = workbook.GetSheet(FulfillmentSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentSheetName}");
+        var headerRowIndex = FindHeaderRow(sheet, formatter);
+        var headerIndex = ReadHeaderIndex(sheet, headerRowIndex, formatter);
+        var orderColumnIndex = ResolveRequiredColumn(headerIndex, AmazonOrderIdHeader, FulfillmentSheetName);
+        var statusColumnIndex = ResolveRequiredColumn(headerIndex, OrderStatusHeader, FulfillmentSheetName);
+        var skuColumnIndex = ResolveRequiredColumn(headerIndex, "sku", FulfillmentSheetName);
+        var quantityColumnIndex = ResolveRequiredColumn(headerIndex, "quantity", FulfillmentSheetName);
+        var itemPriceColumnIndex = ResolveRequiredColumn(headerIndex, "item-price", FulfillmentSheetName);
+        var shippingPriceColumnIndex = ResolveRequiredColumn(headerIndex, "shipping-price", FulfillmentSheetName);
+        var storeColumnIndex = ResolveStoreColumnIndex(headerIndex, 14);
+
+        for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null
+                || IsCellFontRed(workbook, row.GetCell(orderColumnIndex))
+                || formatter.FormatCellValue(row.GetCell(statusColumnIndex)).Contains("cancelled", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!TryResolveStore(formatter.FormatCellValue(row.GetCell(storeColumnIndex)), out var store)
+                || !metricsByStore.TryGetValue(store, out var metricsByPerson))
+            {
+                continue;
+            }
+
+            var sku = formatter.FormatCellValue(row.GetCell(skuColumnIndex)).Trim();
+            if (!skuMappings.TryGetValue(sku, out var mapping))
+            {
+                continue;
+            }
+
+            var owner = ResolveSummaryPerson(mapping.Owner, metricsByPerson.Keys);
+            if (owner is null)
+            {
+                continue;
+            }
+
+            var quantity = ReadNumericCell(row.GetCell(quantityColumnIndex), formatter);
+            var salesTotal = ReadNumericCell(row.GetCell(itemPriceColumnIndex), formatter)
+                + ReadNumericCell(row.GetCell(shippingPriceColumnIndex), formatter);
+            var procurement = b2bCosts.TryGetValue(mapping.ItemCode, out var unitCost) ? unitCost * quantity : 0D;
+            var premium = CalculatePremium(salesTotal, procurement, salesTotal * 0.05D);
+
+            var metrics = metricsByPerson[owner];
+            metricsByPerson[owner] = metrics with
+            {
+                Orders = metrics.Orders + quantity,
+                SalesTotal = metrics.SalesTotal + salesTotal,
+                Premium = metrics.Premium + premium
+            };
+        }
+    }
+
+    private static void AddStoreAdvertisingMetrics(
+        IWorkbook workbook,
+        DataFormatter formatter,
+        IReadOnlyDictionary<string, SkuMapping> skuMappings,
+        IReadOnlyDictionary<string, IDictionary<string, DailySummaryMetrics>> metricsByStore)
+    {
+        var sheet = workbook.GetSheet(AdvertisingSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {AdvertisingSheetName}");
+        const int skuColumnIndex = 6; // Excel column G.
+        const int costColumnIndex = 12; // Excel column M.
+        var headerRowIndex = FindHeaderRow(sheet, formatter);
+        var headerIndex = ReadHeaderIndex(sheet, headerRowIndex, formatter);
+        var storeColumnIndex = ResolveStoreColumnIndex(headerIndex, 15);
+
+        for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            if (!TryResolveStore(formatter.FormatCellValue(row.GetCell(storeColumnIndex)), out var store)
+                || !metricsByStore.TryGetValue(store, out var metricsByPerson))
+            {
+                continue;
+            }
+
+            var sku = formatter.FormatCellValue(row.GetCell(skuColumnIndex)).Trim();
+            if (!skuMappings.TryGetValue(sku, out var mapping))
+            {
+                continue;
+            }
+
+            var owner = ResolveSummaryPerson(mapping.Owner, metricsByPerson.Keys);
+            if (owner is null)
+            {
+                continue;
+            }
+
+            var metrics = metricsByPerson[owner];
+            metricsByPerson[owner] = metrics with
+            {
+                AdvertisingCost = metrics.AdvertisingCost + ReadNumericCell(row.GetCell(costColumnIndex), formatter)
+            };
+        }
+    }
+
+    private static void AddStorePaymentMetrics(
+        IWorkbook workbook,
+        DataFormatter formatter,
+        IReadOnlyDictionary<string, SkuMapping> skuMappings,
+        IReadOnlyDictionary<string, double> b2bCosts,
+        IReadOnlyDictionary<string, IDictionary<string, DailySummaryMetrics>> metricsByStore)
+    {
+        var sheet = workbook.GetSheet(PaymentsSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {PaymentsSheetName}");
+        var headerRowIndex = FindHeaderRow(sheet, formatter);
+        var headerIndex = ReadHeaderIndex(sheet, headerRowIndex, formatter);
+        var typeColumnIndex = ResolveRequiredColumn(headerIndex, "type", PaymentsSheetName);
+        var skuColumnIndex = ResolveRequiredColumn(headerIndex, "sku", PaymentsSheetName);
+        var quantityColumnIndex = ResolveRequiredColumn(headerIndex, "quantity", PaymentsSheetName);
+        var productSalesColumnIndex = ResolveRequiredColumn(headerIndex, "product sales", PaymentsSheetName);
+        var shippingCreditsColumnIndex = ResolveRequiredColumn(headerIndex, "shipping credits", PaymentsSheetName);
+        var totalColumnIndex = ResolveRequiredColumn(headerIndex, "total", PaymentsSheetName);
+        var storeColumnIndex = ResolveStoreColumnIndex(headerIndex, 32);
+
+        for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            if (!TryResolveStore(formatter.FormatCellValue(row.GetCell(storeColumnIndex)), out var store)
+                || !metricsByStore.TryGetValue(store, out var metricsByPerson))
+            {
+                continue;
+            }
+
+            var sku = formatter.FormatCellValue(row.GetCell(skuColumnIndex)).Trim();
+            if (!skuMappings.TryGetValue(sku, out var mapping))
+            {
+                continue;
+            }
+
+            var owner = ResolveSummaryPerson(mapping.Owner, metricsByPerson.Keys);
+            if (owner is null)
+            {
+                continue;
+            }
+
+            var type = formatter.FormatCellValue(row.GetCell(typeColumnIndex)).Trim();
+            var metrics = metricsByPerson[owner];
+            if (string.Equals(type, "order", StringComparison.OrdinalIgnoreCase))
+            {
+                var quantity = ReadNumericCell(row.GetCell(quantityColumnIndex), formatter);
+                var salesTotal = ReadNumericCell(row.GetCell(productSalesColumnIndex), formatter)
+                    + ReadNumericCell(row.GetCell(shippingCreditsColumnIndex), formatter);
+                var procurement = b2bCosts.TryGetValue(mapping.ItemCode, out var unitCost) ? unitCost * quantity : 0D;
+                metricsByPerson[owner] = metrics with
+                {
+                    Payments = metrics.Payments + salesTotal,
+                    PaymentPremium = metrics.PaymentPremium + CalculatePremium(salesTotal, procurement, 0D)
+                };
+            }
+            else if (string.Equals(type, "refund", StringComparison.OrdinalIgnoreCase))
+            {
+                metricsByPerson[owner] = metrics with
+                {
+                    Refund = metrics.Refund + ReadNumericCell(row.GetCell(totalColumnIndex), formatter)
+                };
+            }
+        }
+    }
+
+    private static int ResolveStoreColumnIndex(IReadOnlyDictionary<string, int> headerIndex, int fallbackColumnIndex)
+    {
+        return headerIndex.TryGetValue("\u8d26\u53f7", out var accountColumnIndex)
+            ? accountColumnIndex
+            : fallbackColumnIndex;
+    }
+
+    private static bool TryResolveStore(string rawStoreName, out string storeName)
+    {
+        var normalized = NormalizeSheetName(rawStoreName);
+        foreach (var store in FulfillmentSummaryStores)
+        {
+            if (string.Equals(NormalizeSheetName(store), normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                storeName = store;
+                return true;
+            }
+        }
+
+        storeName = string.Empty;
+        return false;
+    }
+
     private static string? ResolveSummaryPerson(
         string rawPersonName,
         IEnumerable<string> personNames)
@@ -1643,15 +2278,36 @@ public sealed class ExcelImportJob
             SetStringCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u59d3\u540d", SummarySheetName), personName);
 
             dailyMetrics.TryGetValue(personName, out var metrics);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u8ba2\u5355", SummarySheetName), metrics.Orders);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u9500\u552e\u603b\u989d", SummarySheetName), metrics.SalesTotal);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u6ea2\u4ef7", SummarySheetName), metrics.Premium);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u5e7f\u544a\u82b1\u8d39", SummarySheetName), metrics.AdvertisingCost);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u6700\u7ec8\u6ea2\u4ef7", SummarySheetName), metrics.Premium - metrics.AdvertisingCost);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "payments", SummarySheetName), metrics.Payments);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "Refund", SummarySheetName), metrics.Refund);
-            SetNumericCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "payment\u6ea2\u4ef7", SummarySheetName), metrics.PaymentPremium);
+            SetDailySummaryMetricCells(targetRow, targetHeaderIndex, metrics, SummarySheetName);
         }
+    }
+
+    private static void SetDailySummaryMetricCells(IRow row, DailySummaryMetrics metrics)
+    {
+        SetNumericCell(row, 2, metrics.Orders);
+        SetNumericCell(row, 3, metrics.SalesTotal);
+        SetNumericCell(row, 4, metrics.Premium);
+        SetNumericCell(row, 5, metrics.AdvertisingCost);
+        SetNumericCell(row, 6, metrics.Premium - metrics.AdvertisingCost);
+        SetNumericCell(row, 7, metrics.Payments);
+        SetNumericCell(row, 8, metrics.Refund);
+        SetNumericCell(row, 9, metrics.PaymentPremium);
+    }
+
+    private static void SetDailySummaryMetricCells(
+        IRow row,
+        IReadOnlyDictionary<string, int> targetHeaderIndex,
+        DailySummaryMetrics metrics,
+        string sheetName)
+    {
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u8ba2\u5355", sheetName), metrics.Orders);
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u9500\u552e\u603b\u989d", sheetName), metrics.SalesTotal);
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u6ea2\u4ef7", sheetName), metrics.Premium);
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u5e7f\u544a\u82b1\u8d39", sheetName), metrics.AdvertisingCost);
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u6700\u7ec8\u6ea2\u4ef7", sheetName), metrics.Premium - metrics.AdvertisingCost);
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "payments", sheetName), metrics.Payments);
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "Refund", sheetName), metrics.Refund);
+        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "payment\u6ea2\u4ef7", sheetName), metrics.PaymentPremium);
     }
 
     private static void AppendSecondDailySummaryRows(
