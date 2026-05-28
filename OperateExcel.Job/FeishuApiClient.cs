@@ -50,6 +50,41 @@ public sealed class FeishuApiClient
         return await DownloadAttachmentAsync(_options.DailyReportAttachmentFieldName, reportDate, cancellationToken);
     }
 
+    internal async Task<IReadOnlyList<FeishuSpreadsheetSheetData>> ReadMappingSpreadsheetSheetsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var sheetIds = ResolveMappingSpreadsheetSheetIds();
+        if (sheetIds.Count == 0)
+        {
+            throw new InvalidOperationException("Feishu mapping spreadsheet sheet URLs are not configured.");
+        }
+
+        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
+        var spreadsheetToken = await ResolveSpreadsheetTokenAsync(
+            _options.MappingSpreadsheetUrl,
+            accessToken,
+            cancellationToken);
+        var sheetTitles = await GetSpreadsheetSheetTitlesAsync(
+            accessToken,
+            spreadsheetToken,
+            cancellationToken);
+
+        var sheets = new List<FeishuSpreadsheetSheetData>();
+        foreach (var sheetId in sheetIds)
+        {
+            var title = sheetTitles.TryGetValue(sheetId, out var sheetTitle) ? sheetTitle : sheetId;
+            var table = await ReadSpreadsheetSheetValuesAsync(
+                accessToken,
+                spreadsheetToken,
+                sheetId,
+                cancellationToken);
+
+            sheets.Add(new FeishuSpreadsheetSheetData(sheetId, title, table));
+        }
+
+        return sheets;
+    }
+
     public async Task UploadDailyReportAttachmentAndMarkCompletedAsync(
         DateOnly reportDate,
         string fileName,
@@ -210,6 +245,108 @@ public sealed class FeishuApiClient
         using var json = await ReadSuccessJsonAsync(response, "Get Feishu wiki node failed", cancellationToken);
         var node = json.RootElement.GetProperty("data").GetProperty("node");
         return ReadRequiredString(node, "obj_token", "wiki node obj_token");
+    }
+
+    private async Task<string> ResolveSpreadsheetTokenAsync(
+        string spreadsheetUrl,
+        string accessToken,
+        CancellationToken cancellationToken)
+    {
+        if (TryReadWikiNodeToken(spreadsheetUrl, out var wikiNodeToken))
+        {
+            using var request = CreateAuthorizedRequest(
+                HttpMethod.Get,
+                $"{ApiBaseUrl}/wiki/v2/spaces/get_node?token={Uri.EscapeDataString(wikiNodeToken)}",
+                accessToken);
+
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            using var json = await ReadSuccessJsonAsync(response, "Get Feishu mapping spreadsheet wiki node failed", cancellationToken);
+            var node = json.RootElement.GetProperty("data").GetProperty("node");
+            return ReadRequiredString(node, "obj_token", "mapping spreadsheet obj_token");
+        }
+
+        if (TryReadSpreadsheetToken(spreadsheetUrl, out var spreadsheetToken))
+        {
+            return spreadsheetToken;
+        }
+
+        throw new InvalidOperationException("Feishu mapping spreadsheet token is not configured.");
+    }
+
+    private async Task<IReadOnlyDictionary<string, string>> GetSpreadsheetSheetTitlesAsync(
+        string accessToken,
+        string spreadsheetToken,
+        CancellationToken cancellationToken)
+    {
+        using var request = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"{ApiBaseUrl}/sheets/v3/spreadsheets/{Uri.EscapeDataString(spreadsheetToken)}/sheets/query",
+            accessToken);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var json = await ReadSuccessJsonAsync(response, "Get Feishu mapping spreadsheet sheets failed", cancellationToken);
+        var titles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var data = json.RootElement.GetProperty("data");
+        if (!data.TryGetProperty("sheets", out var sheets) || sheets.ValueKind != JsonValueKind.Array)
+        {
+            return titles;
+        }
+
+        foreach (var sheet in sheets.EnumerateArray())
+        {
+            var sheetId = TryReadString(sheet, "sheet_id");
+            var title = TryReadString(sheet, "title");
+            if (!string.IsNullOrWhiteSpace(sheetId) && !string.IsNullOrWhiteSpace(title))
+            {
+                titles[sheetId] = title;
+            }
+        }
+
+        return titles;
+    }
+
+    private async Task<TableData> ReadSpreadsheetSheetValuesAsync(
+        string accessToken,
+        string spreadsheetToken,
+        string sheetId,
+        CancellationToken cancellationToken)
+    {
+        using var request = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"{ApiBaseUrl}/sheets/v2/spreadsheets/{Uri.EscapeDataString(spreadsheetToken)}/values/{Uri.EscapeDataString(sheetId)}",
+            accessToken);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var json = await ReadSuccessJsonAsync(response, "Read Feishu mapping spreadsheet values failed", cancellationToken);
+        var valueRange = json.RootElement.GetProperty("data").GetProperty("valueRange");
+        if (!valueRange.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
+        {
+            return new TableData([], []);
+        }
+
+        var rawRows = values
+            .EnumerateArray()
+            .Where(row => row.ValueKind == JsonValueKind.Array)
+            .Select(row => row.EnumerateArray().Select(ConvertSpreadsheetCellValue).ToList())
+            .ToList();
+
+        var headerRowIndex = rawRows.FindIndex(row => row.Any(value => !string.IsNullOrWhiteSpace(value)));
+        if (headerRowIndex < 0)
+        {
+            return new TableData([], []);
+        }
+
+        var headers = rawRows[headerRowIndex]
+            .Select(DelimitedTableReader.CleanHeader)
+            .ToList();
+        var columnCount = headers.Count;
+        var rows = rawRows
+            .Skip(headerRowIndex + 1)
+            .Select(row => PadRow(row, columnCount))
+            .Where(row => row.Any(value => !string.IsNullOrWhiteSpace(value)))
+            .ToList();
+
+        return new TableData(headers, rows);
     }
 
     private async Task<string> GetAttachmentFileTokenAsync(
@@ -639,6 +776,15 @@ public sealed class FeishuApiClient
         return TryReadQueryValue(_options.WikiUrl, "view", out var viewId) ? viewId : null;
     }
 
+    private IReadOnlyList<string> ResolveMappingSpreadsheetSheetIds()
+    {
+        return _options.MappingSpreadsheetSheetUrls
+            .Select(url => TryReadQueryValue(url, "sheet", out var sheetId) ? sheetId : string.Empty)
+            .Where(sheetId => !string.IsNullOrWhiteSpace(sheetId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static bool TryReadWikiNodeToken(string wikiUrl, out string token)
     {
         token = string.Empty;
@@ -655,6 +801,28 @@ public sealed class FeishuApiClient
 
         token = segments[^1];
         return token.Length > 0;
+    }
+
+    private static bool TryReadSpreadsheetToken(string spreadsheetUrl, out string token)
+    {
+        token = string.Empty;
+        if (!Uri.TryCreate(spreadsheetUrl, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < segments.Length - 1; i++)
+        {
+            if (string.Equals(segments[i], "sheets", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(segments[i], "sheet", StringComparison.OrdinalIgnoreCase))
+            {
+                token = segments[i + 1];
+                return token.Length > 0;
+            }
+        }
+
+        return false;
     }
 
     private static bool TryReadQueryValue(string url, string name, out string value)
@@ -748,6 +916,29 @@ public sealed class FeishuApiClient
             : null;
     }
 
+    private static string ConvertSpreadsheetCellValue(JsonElement cell)
+    {
+        return cell.ValueKind switch
+        {
+            JsonValueKind.String => cell.GetString() ?? string.Empty,
+            JsonValueKind.Number => cell.GetRawText(),
+            JsonValueKind.True => bool.TrueString,
+            JsonValueKind.False => bool.FalseString,
+            JsonValueKind.Null or JsonValueKind.Undefined => string.Empty,
+            _ => cell.ToString() ?? string.Empty
+        };
+    }
+
+    private static IReadOnlyList<string> PadRow(IReadOnlyList<string> row, int columnCount)
+    {
+        if (row.Count >= columnCount)
+        {
+            return row;
+        }
+
+        return row.Concat(Enumerable.Repeat(string.Empty, columnCount - row.Count)).ToList();
+    }
+
     private InvalidOperationException CreateAttachmentFailure(string detail)
     {
         _logger.LogError("{AttachmentReadFailed}: {Detail}", AttachmentReadFailed, detail);
@@ -764,3 +955,5 @@ public sealed class FeishuApiClient
 
     private sealed record FeishuRecord(string RecordId, JsonElement Fields);
 }
+
+internal sealed record FeishuSpreadsheetSheetData(string SheetId, string Title, TableData Table);

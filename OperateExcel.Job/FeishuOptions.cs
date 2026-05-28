@@ -19,4 +19,12 @@ public sealed class FeishuOptions
     public string SourceSheetName { get; set; } = "B2BOL";
     public string TargetSheetName { get; set; } = "B2B\uff08ol)";
     public string MappingTargetSheetName { get; set; } = "\u6620\u5c04\u8868";
+    public string MappingSpreadsheetUrl { get; set; } = "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd";
+    public string[] MappingSpreadsheetSheetUrls { get; set; } =
+    [
+        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=79edea",
+        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=JLQ3Ie",
+        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=PKwiQn",
+        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=G8R0HR"
+    ];
 }

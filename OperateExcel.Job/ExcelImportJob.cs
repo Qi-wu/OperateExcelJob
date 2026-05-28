@@ -512,26 +512,17 @@ public sealed class ExcelImportJob
             throw new InvalidOperationException("Feishu mapping import is enabled, but AppId/AppSecret or table configuration is incomplete.");
         }
 
-        var attachmentBytes = _feishuClient
-            .DownloadMappingAttachmentAsync(processingDate)
+        var sourceSheets = _feishuClient
+            .ReadMappingSpreadsheetSheetsAsync()
             .GetAwaiter()
             .GetResult();
 
-        using var stream = new MemoryStream(attachmentBytes);
-        var sourceWorkbook = WorkbookFactory.Create(stream);
-        try
-        {
-            var targetSheet = FindSheet(targetWorkbook, _feishuOptions.MappingTargetSheetName)
-                ?? FindSheet(targetWorkbook, MappingSheetName)
-                ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.MappingTargetSheetName}");
+        var targetSheet = FindSheet(targetWorkbook, _feishuOptions.MappingTargetSheetName)
+            ?? FindSheet(targetWorkbook, MappingSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.MappingTargetSheetName}");
 
-            var importedRows = CopyMappingSheetsToTarget(sourceWorkbook, targetSheet, formatter, cellStyleCache);
-            messages.Add($"Imported {importedRows} rows from Feishu mapping attachment to sheet {targetSheet.SheetName}.");
-        }
-        finally
-        {
-            sourceWorkbook.Close();
-        }
+        var importedRows = CopyMappingSpreadsheetSheetsToTarget(sourceSheets, targetSheet, formatter, cellStyleCache);
+        messages.Add($"Imported {importedRows} rows from Feishu mapping spreadsheet to sheet {targetSheet.SheetName}.");
     }
 
     private void UpdateRmaApplicationFromRefundPayments(
@@ -2102,6 +2093,76 @@ public sealed class ExcelImportJob
         }
 
         return nextTargetRowIndex - targetHeaderRowIndex - 1;
+    }
+
+    private static int CopyMappingSpreadsheetSheetsToTarget(
+        IReadOnlyList<FeishuSpreadsheetSheetData> sourceSheets,
+        ISheet targetSheet,
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
+    {
+        var targetHeaderRowIndex = FindHeaderRow(targetSheet, formatter);
+        if (targetHeaderRowIndex < 0)
+        {
+            throw new InvalidOperationException($"No header row found in sheet: {targetSheet.SheetName}");
+        }
+
+        var targetHeaders = ReadRow(targetSheet.GetRow(targetHeaderRowIndex), formatter)
+            .Select(DelimitedTableReader.CleanHeader)
+            .ToList();
+        var targetHeaderIndex = BuildHeaderIndex(targetHeaders);
+        var accountColumnIndex = ResolveRequiredColumn(targetHeaderIndex, "\u8d26\u53f7", targetSheet.SheetName);
+        var copyColumns = MappingImportHeaders
+            .Select(header => new CopyColumn(-1, ResolveRequiredColumn(targetHeaderIndex, header, targetSheet.SheetName), header))
+            .ToList();
+
+        ClearWritableCells(
+            targetSheet,
+            targetHeaderRowIndex,
+            copyColumns.Select(column => column.TargetColumnIndex).Concat([accountColumnIndex]));
+
+        var nextTargetRowIndex = targetHeaderRowIndex + 1;
+        foreach (var sourceSheet in MappingSourceSheets)
+        {
+            var matchedSheet = FindMappingSpreadsheetSheet(sourceSheets, sourceSheet)
+                ?? throw new InvalidOperationException(
+                    $"Sheet not found in Feishu mapping spreadsheet. Expected one of: {string.Join(", ", sourceSheet.SheetNameCandidates)}. Actual sheets: {string.Join(", ", sourceSheets.Select(sheet => sheet.Title))}");
+
+            var sourceHeaderIndex = BuildHeaderIndex(matchedSheet.Table.Headers);
+            var resolvedColumns = copyColumns
+                .Select(column => column with
+                {
+                    SourceColumnIndex = ResolveRequiredColumn(sourceHeaderIndex, column.Header, matchedSheet.Title)
+                })
+                .ToList();
+
+            foreach (var sourceRow in matchedSheet.Table.Rows)
+            {
+                var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
+                foreach (var column in resolvedColumns)
+                {
+                    var value = column.SourceColumnIndex < sourceRow.Count
+                        ? sourceRow[column.SourceColumnIndex]
+                        : string.Empty;
+
+                    SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
+                }
+
+                SetCellValue(targetRow.CreateCell(accountColumnIndex), sourceSheet.AccountName, cellStyleCache);
+                nextTargetRowIndex++;
+            }
+        }
+
+        return nextTargetRowIndex - targetHeaderRowIndex - 1;
+    }
+
+    private static FeishuSpreadsheetSheetData? FindMappingSpreadsheetSheet(
+        IReadOnlyList<FeishuSpreadsheetSheetData> sourceSheets,
+        MappingSourceSheet expectedSheet)
+    {
+        return sourceSheets.FirstOrDefault(sheet =>
+            expectedSheet.SheetNameCandidates.Any(candidate =>
+                string.Equals(NormalizeSheetName(sheet.Title), NormalizeSheetName(candidate), StringComparison.OrdinalIgnoreCase)));
     }
 
     private static IReadOnlyList<IReadOnlyDictionary<string, string>> ReadRefundPaymentRows(

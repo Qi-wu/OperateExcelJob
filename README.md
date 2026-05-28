@@ -32,13 +32,22 @@ Use `--date=yyyy-MM-dd` only for manual backfill.
 
 Before importing `fulfillment`, `payments`, and `广告`, the job queries the configured Feishu bitable record whose `日期` field equals the processing date, validates that the `损益表` attachment exists and contains exactly one `.xlsx` file, downloads it, then copies the `B2BOL` sheet into `B2B（ol)` by matching column headers.
 
+The `映射表` sheet is filled from the configured Feishu spreadsheet sheets instead of the bitable `映射表` attachment. The importer reads the four sheet URLs in `MappingSpreadsheetSheetUrls`, matches each sheet by its title using the original mapping-sheet name rules, copies `平台SKU`, `Asin`, `B2B Item Code`, and `运营`, then fills the target `账号` column with the original account values.
+
 Fill these values in `OperateExcel.Job/appsettings.json` before running:
 
 ```json
 "Feishu": {
   "Enabled": true,
   "AppId": "your-app-id",
-  "AppSecret": "your-app-secret"
+  "AppSecret": "your-app-secret",
+  "MappingSpreadsheetUrl": "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd",
+  "MappingSpreadsheetSheetUrls": [
+    "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=79edea",
+    "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=JLQ3Ie",
+    "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=PKwiQn",
+    "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=G8R0HR"
+  ]
 }
 ```
 
