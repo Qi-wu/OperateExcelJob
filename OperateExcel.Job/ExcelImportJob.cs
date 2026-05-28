@@ -391,6 +391,7 @@ public sealed class ExcelImportJob
                         var value = column.SourceColumnIndex < sourceRow.Count
                             ? sourceRow[column.SourceColumnIndex]
                             : string.Empty;
+                        value = NormalizeImportedCellValue(sheetName, column.Header, value);
 
                         SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
                     }
@@ -3420,6 +3421,18 @@ public sealed class ExcelImportJob
     private static string NormalizeExcelCurrencyFormat(string text)
     {
         return ExcelCurrencyFormatRegex.Replace(text, match => match.Groups[1].Value);
+    }
+
+    private static string NormalizeImportedCellValue(string sheetName, string header, string value)
+    {
+        if (string.Equals(sheetName, PaymentsSheetName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(header, "type", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(value.Trim(), "Chargeback Refund", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Refund";
+        }
+
+        return value;
     }
 
     private static void ClearDataRows(ISheet sheet, int startRowIndex, int endRowIndex, bool preserveFormulas)
