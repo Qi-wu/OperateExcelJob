@@ -2211,11 +2211,18 @@ public sealed class ExcelImportJob
 
     private static double CalculatePremium(double salesTotal, double procurement, double fixedFee)
     {
-        var orderIncome = salesTotal > 200D
+        if (procurement == 0)
+        {
+            return 0;
+        }
+        else
+        {
+            var orderIncome = salesTotal > 200D
             ? (salesTotal - 200D) * 0.9D + 200D * 0.85D
             : salesTotal * 0.85D;
 
-        return orderIncome - procurement - fixedFee;
+            return orderIncome - procurement - fixedFee;
+        }
     }
 
     private static double ReadNumericCell(ICell? cell, DataFormatter formatter)
