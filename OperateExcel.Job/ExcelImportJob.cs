@@ -515,7 +515,7 @@ public sealed class ExcelImportJob
         ICollection<string> messages)
     {
         var sourceFile = FindB2BOlSourceFile(sourceDirectory);
-        var sourceTable = ReadExcelTable(sourceFile, formatter);
+        var sourceTable = ReadExcelTableWithTwoRowHeaders(sourceFile, formatter);
         var targetSheet = FindSheet(targetWorkbook, _feishuOptions.TargetSheetName)
             ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.TargetSheetName}");
 
@@ -2603,6 +2603,15 @@ public sealed class ExcelImportJob
         return table;
     }
 
+    private static TableData ReadExcelTableWithTwoRowHeaders(string path, DataFormatter formatter)
+    {
+        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var workbook = WorkbookFactory.Create(stream);
+        var table = ReadExcelTableWithTwoRowHeaders(workbook, workbook.GetSheetAt(0), formatter);
+        workbook.Close();
+        return table;
+    }
+
     private static TableData ReadExcelTable(IWorkbook workbook, string sheetName, DataFormatter formatter)
     {
         var sheet = FindSheet(workbook, sheetName)
@@ -2641,6 +2650,71 @@ public sealed class ExcelImportJob
         }
 
         return new TableData(headers, rows);
+    }
+
+    private static TableData ReadExcelTableWithTwoRowHeaders(IWorkbook workbook, ISheet sheet, DataFormatter formatter)
+    {
+        var evaluator = workbook.GetCreationHelper().CreateFormulaEvaluator();
+        var headerRowIndex = FindHeaderRow(sheet, formatter);
+        if (headerRowIndex < 0)
+        {
+            return new TableData([], []);
+        }
+
+        var firstHeaderRow = sheet.GetRow(headerRowIndex);
+        var secondHeaderRow = sheet.GetRow(headerRowIndex + 1);
+        if (secondHeaderRow is null || !HasMergedHeaderRegion(sheet, headerRowIndex))
+        {
+            return ReadExcelTable(workbook, sheet, formatter);
+        }
+
+        var headerColumnCount = Math.Max(
+            firstHeaderRow.LastCellNum > 0 ? firstHeaderRow.LastCellNum : 0,
+            secondHeaderRow.LastCellNum > 0 ? secondHeaderRow.LastCellNum : 0);
+        var firstHeaders = ReadRow(firstHeaderRow, formatter, headerColumnCount, evaluator);
+        var secondHeaders = ReadRow(secondHeaderRow, formatter, headerColumnCount, evaluator);
+        var headers = firstHeaders
+            .Select((header, columnIndex) =>
+            {
+                var detailHeader = DelimitedTableReader.CleanHeader(secondHeaders[columnIndex]);
+                return detailHeader.Length > 0
+                    ? detailHeader
+                    : DelimitedTableReader.CleanHeader(header);
+            })
+            .ToList();
+
+        var rows = new List<IReadOnlyList<string>>();
+        for (var rowIndex = headerRowIndex + 2; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            var values = ReadRow(row, formatter, headers.Count, evaluator);
+            if (values.Any(value => !string.IsNullOrWhiteSpace(value)))
+            {
+                rows.Add(values);
+            }
+        }
+
+        return new TableData(headers, rows);
+    }
+
+    private static bool HasMergedHeaderRegion(ISheet sheet, int headerRowIndex)
+    {
+        for (var i = 0; i < sheet.NumMergedRegions; i++)
+        {
+            var region = sheet.GetMergedRegion(i);
+            if (region.FirstRow <= headerRowIndex
+                && region.LastRow >= headerRowIndex + 1)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static int CopyTableDataToSheet(
