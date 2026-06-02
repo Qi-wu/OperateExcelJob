@@ -65,12 +65,34 @@ Backfill the supplied sample date:
 dotnet run --project OperateExcel.Job\OperateExcel.Job.csproj -- --run-once --date=2026-05-22
 ```
 
-## Hangfire
+## Windows Service
 
-Set `ConnectionStrings:Hangfire` in `OperateExcel.Job/appsettings.json` to a SQL Server connection string. When configured, the app registers a recurring Hangfire job with `ExcelImport:DailyCron`, defaulting to `0 2 * * *`.
+The job runs as a .NET background service and can be registered as a Windows service. The schedule is controlled by `ExcelImport:DailyCron`, defaulting to `0 2 * * *` (02:00 local time every day). Only daily cron expressions in the form `minute hour * * *` are supported.
 
-Hangfire dashboard is available at:
+Publish the service:
+
+```powershell
+dotnet publish OperateExcel.Job\OperateExcel.Job.csproj -c Release -o C:\OperateExcelJob
+```
+
+Register it from an elevated PowerShell prompt:
+
+```powershell
+New-Service -Name OperateExcelJob -BinaryPathName "C:\OperateExcelJob\OperateExcel.Job.exe" -DisplayName "OperateExcelJob" -StartupType Automatic
+Start-Service OperateExcelJob
+```
+
+Stop and remove it:
+
+```powershell
+Stop-Service OperateExcelJob
+sc.exe delete OperateExcelJob
+```
+
+## Local logs
+
+Runtime logs are written to daily files under the configured `FileLog:Directory`. With the default config, logs are stored beside the published executable:
 
 ```text
-http://localhost:5000/hangfire
+C:\OperateExcelJob\logs\operate-excel-yyyyMMdd.log
 ```

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NPOI.SS.UserModel;
 using NPOI.XSSF.UserModel;
@@ -1138,7 +1139,7 @@ public sealed class ExcelImportJob
                     hasBorder: true);
                 SetDateCell(summaryRow, StoreDailySummaryStartColumnIndex, processingDate, cellStyleCache);
                 SetStringCell(summaryRow, StoreDailySummaryStartColumnIndex + 1, person);
-                SetStoreDailySummaryFormulaCells(summaryRow);
+                SetStoreDailySummaryFormulaCells(summaryRow, cellStyleCache);
 
                 nextTargetRowIndex++;
                 nextSummaryRowIndex++;
@@ -1150,7 +1151,8 @@ public sealed class ExcelImportJob
             SetStoreDailySummaryTotalFormulas(
                 totalRow,
                 nextSummaryRowIndex - storePeople.Count,
-                nextSummaryRowIndex - 1);
+                nextSummaryRowIndex - 1,
+                cellStyleCache);
             ApplyStoreDailySummaryTotalStyle(targetSheet, totalRow, cellStyleCache);
             nextSummaryRowIndex++;
             ClearBlankStoreDailySummaryTemplateRows(targetSheet, nextSummaryRowIndex);
@@ -1242,7 +1244,7 @@ public sealed class ExcelImportJob
         return false;
     }
 
-    private static void SetStoreDailySummaryFormulaCells(IRow row)
+    private static void SetStoreDailySummaryFormulaCells(IRow row, CellStyleCache cellStyleCache)
     {
         var rowNumber = row.RowNum + 1;
         var dateRef = CellReference(StoreDailySummaryStartColumnIndex, rowNumber);
@@ -1254,17 +1256,25 @@ public sealed class ExcelImportJob
         SetFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,{dateRef},$B:$B,{personRef})");
         SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
+        SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
+        SetPercentCellStyle(row, 22, cellStyleCache);
         SetFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,{dateRef},$B:$B,{personRef})");
         SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetPercentCellStyle(row, 24, cellStyleCache);
         SetFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,{dateRef},$B:$B,{personRef})");
         SetFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,{dateRef},$B:$B,{personRef})");
         SetFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+        SetPercentCellStyle(row, 28, cellStyleCache);
         SetFormulaCell(row, 29, $"X{rowNumber}+Z{rowNumber}");
     }
 
-    private static void SetStoreDailySummaryTotalFormulas(IRow row, int firstPersonRowIndex, int lastPersonRowIndex)
+    private static void SetStoreDailySummaryTotalFormulas(
+        IRow row,
+        int firstPersonRowIndex,
+        int lastPersonRowIndex,
+        CellStyleCache cellStyleCache)
     {
         var rowNumber = row.RowNum + 1;
         var firstRowNumber = firstPersonRowIndex + 1;
@@ -1278,9 +1288,13 @@ public sealed class ExcelImportJob
 
         SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
+        SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
+        SetPercentCellStyle(row, 22, cellStyleCache);
         SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetPercentCellStyle(row, 24, cellStyleCache);
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+        SetPercentCellStyle(row, 28, cellStyleCache);
     }
 
     private static void ApplyStoreDailySummaryDetailStyle(
@@ -1313,7 +1327,16 @@ public sealed class ExcelImportJob
             cell.CellStyle = totalStyle;
         }
 
+        ApplyStoreDailyPercentStyles(totalRow, cellStyleCache);
         MergeStoreDailySummaryTotalLabelCells(sheet, totalRow.RowNum);
+    }
+
+    private static void ApplyStoreDailyPercentStyles(IRow row, CellStyleCache cellStyleCache)
+    {
+        foreach (var columnIndex in new[] { 21, 22, 24, 28 })
+        {
+            SetPercentCellStyle(row, columnIndex, cellStyleCache);
+        }
     }
 
     private static void MergeStoreDailySummaryTotalLabelCells(ISheet sheet, int rowIndex)
@@ -1753,6 +1776,7 @@ public sealed class ExcelImportJob
             secondSummaryFirstRowIndex,
             formatter,
             cellStyleCache);
+        ApplySummarySheetCenterAlignment(summarySheet, cellStyleCache);
 
         return FulfillmentSummaryPeople.Count + FulfillmentSummaryPeople.Count + 1;
     }
@@ -2398,7 +2422,8 @@ public sealed class ExcelImportJob
             CopyRowStyle(templatePersonRow, targetRow, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryColumnCount);
             SetDateCell(targetRow, PaymentSecondDailySummaryStartColumnIndex, processingDate, cellStyleCache);
             SetStringCell(targetRow, PaymentSecondDailySummaryStartColumnIndex + 1, personName);
-            SetSecondDailySummaryPersonFormulas(targetRow, personName);
+            SetSecondDailySummaryPersonFormulas(targetRow, personName, cellStyleCache);
+            ApplySecondDailySummaryDetailStyle(targetRow, cellStyleCache);
         }
 
         var totalRowIndex = startRowIndex + FulfillmentSummaryPeople.Count;
@@ -2408,10 +2433,11 @@ public sealed class ExcelImportJob
             : templatePersonRow;
         CopyRowStyle(templateTotalRow, totalRow, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryColumnCount);
         SetStringCell(totalRow, PaymentSecondDailySummaryStartColumnIndex, "\u5408\u8ba1");
-        SetSecondDailySummaryTotalFormulas(totalRow, startRowIndex, totalRowIndex - 1);
+        SetSecondDailySummaryTotalFormulas(totalRow, startRowIndex, totalRowIndex - 1, cellStyleCache);
+        ApplySecondDailySummaryTotalStyle(summarySheet, totalRow, cellStyleCache);
     }
 
-    private static void SetSecondDailySummaryPersonFormulas(IRow row, string personName)
+    private static void SetSecondDailySummaryPersonFormulas(IRow row, string personName, CellStyleCache cellStyleCache)
     {
         var rowNumber = row.RowNum + 1;
         var personRef = CellReference(PaymentSecondDailySummaryStartColumnIndex + 1, rowNumber);
@@ -2422,20 +2448,28 @@ public sealed class ExcelImportJob
         SetFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,O{rowNumber},$B:$B,{personRef})");
         SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
+        SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
+        SetPercentCellStyle(row, 22, cellStyleCache);
         SetFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,O{rowNumber},$B:$B,{personRef})");
         SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetPercentCellStyle(row, 24, cellStyleCache);
         SetFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,O{rowNumber},$B:$B,{personRef})");
         SetFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,O{rowNumber},$B:$B,{personRef})");
         SetFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+        SetPercentCellStyle(row, 28, cellStyleCache);
         SetFormulaCell(row, 29, $"AF{rowNumber}/30");
         SetFormulaCell(row, 30, $"X{rowNumber}+Z{rowNumber}+SUMIFS($AE:$AE,$O:$O,O{rowNumber}-1,$P:$P,{personRef})");
         SetNumericCell(row, 31, PaymentMonthlyBudgetByPerson.TryGetValue(personName, out var budget) ? budget : 0D);
         SetFormulaCell(row, 32, $"R{rowNumber}-AD{rowNumber}");
     }
 
-    private static void SetSecondDailySummaryTotalFormulas(IRow row, int firstRowIndex, int lastRowIndex)
+    private static void SetSecondDailySummaryTotalFormulas(
+        IRow row,
+        int firstRowIndex,
+        int lastRowIndex,
+        CellStyleCache cellStyleCache)
     {
         var rowNumber = row.RowNum + 1;
         var firstRowNumber = firstRowIndex + 1;
@@ -2448,10 +2482,71 @@ public sealed class ExcelImportJob
         }
 
         SetFormulaCell(row, 21, $"T{rowNumber}/R{rowNumber}");
+        SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"U{rowNumber}/R{rowNumber}");
+        SetPercentCellStyle(row, 22, cellStyleCache);
         SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
+        SetPercentCellStyle(row, 24, cellStyleCache);
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
+        SetPercentCellStyle(row, 28, cellStyleCache);
+    }
+
+    private static void ApplySummarySheetCenterAlignment(ISheet summarySheet, CellStyleCache cellStyleCache)
+    {
+        for (var rowIndex = 0; rowIndex <= summarySheet.LastRowNum; rowIndex++)
+        {
+            var row = summarySheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            foreach (var cell in row.Cells)
+            {
+                cell.CellStyle = cellStyleCache.GetCenteredStyle(cell.CellStyle);
+            }
+        }
+    }
+
+    private static void ApplySecondDailySummaryTotalStyle(
+        ISheet summarySheet,
+        IRow totalRow,
+        CellStyleCache cellStyleCache)
+    {
+        var headerCell = summarySheet.GetRow(0)?.GetCell(PaymentSecondDailySummaryStartColumnIndex);
+        var totalStyle = cellStyleCache.GetStoreDailyTotalStyle(headerCell?.CellStyle);
+        for (var columnIndex = PaymentSecondDailySummaryStartColumnIndex;
+             columnIndex < PaymentSecondDailySummaryStartColumnIndex + PaymentSecondDailySummaryColumnCount;
+             columnIndex++)
+        {
+            var cell = totalRow.GetCell(columnIndex) ?? totalRow.CreateCell(columnIndex);
+            cell.CellStyle = totalStyle;
+        }
+
+        ApplyStoreDailyPercentStyles(totalRow, cellStyleCache);
+        MergeSecondDailySummaryTotalLabelCells(summarySheet, totalRow.RowNum);
+    }
+
+    private static void ApplySecondDailySummaryDetailStyle(IRow row, CellStyleCache cellStyleCache)
+    {
+        for (var columnIndex = PaymentSecondDailySummaryStartColumnIndex; columnIndex <= 31; columnIndex++)
+        {
+            var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
+            cell.CellStyle = cellStyleCache.GetSummaryDetailBorderStyle(cell.CellStyle);
+        }
+    }
+
+    private static void MergeSecondDailySummaryTotalLabelCells(ISheet sheet, int rowIndex)
+    {
+        var region = new NPOI.SS.Util.CellRangeAddress(
+            rowIndex,
+            rowIndex,
+            PaymentSecondDailySummaryStartColumnIndex,
+            PaymentSecondDailySummaryStartColumnIndex + 1);
+
+        RemoveOverlappingMergedRegions(sheet, region);
+        sheet.AddMergedRegion(region);
     }
 
     private static IRow? FindSecondDailySummaryTemplatePersonRow(ISheet sheet, DataFormatter formatter)
@@ -2588,6 +2683,12 @@ public sealed class ExcelImportJob
     {
         var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
         cell.SetCellFormula(formula);
+    }
+
+    private static void SetPercentCellStyle(IRow row, int columnIndex, CellStyleCache cellStyleCache)
+    {
+        var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
+        cell.CellStyle = cellStyleCache.GetPercentStyle(cell.CellStyle);
     }
 
     private static void SetNumericCell(IRow row, int columnIndex, double value)
@@ -3818,7 +3919,10 @@ public sealed class ExcelImportJob
         private readonly Dictionary<string, ICellStyle> _styles = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<short, ICellStyle> _redFontStyles = new();
         private readonly Dictionary<short, ICellStyle> _dateStyles = new();
+        private readonly Dictionary<short, ICellStyle> _percentStyles = new();
+        private readonly Dictionary<short, ICellStyle> _centeredStyles = new();
         private readonly Dictionary<short, ICellStyle> _plainStyles = new();
+        private readonly Dictionary<short, ICellStyle> _summaryDetailBorderStyles = new();
         private readonly Dictionary<short, ICellStyle> _storeDailyTotalStyles = new();
 
         public CellStyleCache(IWorkbook workbook)
@@ -3880,6 +3984,45 @@ public sealed class ExcelImportJob
             return style;
         }
 
+        public ICellStyle GetPercentStyle(ICellStyle? baseStyle)
+        {
+            var baseStyleIndex = baseStyle?.Index ?? 0;
+            if (_percentStyles.TryGetValue(baseStyleIndex, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            if (baseStyle is not null)
+            {
+                style.CloneStyleFrom(baseStyle);
+            }
+
+            style.DataFormat = _dataFormat.GetFormat(ResolveFormat("percent"));
+            _percentStyles.Add(baseStyleIndex, style);
+            return style;
+        }
+
+        public ICellStyle GetCenteredStyle(ICellStyle? baseStyle)
+        {
+            var baseStyleIndex = baseStyle?.Index ?? 0;
+            if (_centeredStyles.TryGetValue(baseStyleIndex, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            if (baseStyle is not null)
+            {
+                style.CloneStyleFrom(baseStyle);
+            }
+
+            style.Alignment = HorizontalAlignment.Center;
+            style.VerticalAlignment = VerticalAlignment.Center;
+            _centeredStyles.Add(baseStyleIndex, style);
+            return style;
+        }
+
         public ICellStyle GetStoreDailyDetailStyle(bool hasBorder)
         {
             var key = hasBorder ? "store-daily-detail-bordered" : "store-daily-detail";
@@ -3897,6 +4040,25 @@ public sealed class ExcelImportJob
 
             style.FillPattern = FillPattern.NoFill;
             _styles.Add(key, style);
+            return style;
+        }
+
+        public ICellStyle GetSummaryDetailBorderStyle(ICellStyle? baseStyle)
+        {
+            var baseStyleIndex = baseStyle?.Index ?? 0;
+            if (_summaryDetailBorderStyles.TryGetValue(baseStyleIndex, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            if (baseStyle is not null)
+            {
+                style.CloneStyleFrom(baseStyle);
+            }
+
+            ApplyThinBorder(style);
+            _summaryDetailBorderStyles.Add(baseStyleIndex, style);
             return style;
         }
 

@@ -1,10 +1,17 @@
-using Hangfire;
-using Hangfire.SqlServer;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using OperateExcel.Job;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory
+});
 
 builder.Services.Configure<ExcelImportOptions>(builder.Configuration.GetSection("ExcelImport"));
+builder.Services.Configure<FileLogOptions>(builder.Configuration.GetSection("FileLog"));
 builder.Services.Configure<FeishuOptions>(builder.Configuration.GetSection("Feishu"));
 builder.Services.PostConfigure<ExcelImportOptions>(options =>
 {
@@ -24,48 +31,29 @@ builder.Services.PostConfigure<ExcelImportOptions>(options =>
         }
     }
 });
+
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+builder.Logging.AddProvider(new FileLoggerProvider(builder.Configuration.GetSection("FileLog").Get<FileLogOptions>() ?? new FileLogOptions()));
+
+builder.Services.AddWindowsService(options =>
+{
+    var serviceName = builder.Configuration.GetValue<string>("WindowsService:ServiceName");
+    options.ServiceName = string.IsNullOrWhiteSpace(serviceName)
+        ? "OperateExcelJob"
+        : serviceName;
+});
+
 builder.Services.AddHttpClient<FeishuApiClient>();
 builder.Services.AddSingleton<ExcelImportJob>();
 
-var hangfireConnectionString = builder.Configuration.GetConnectionString("Hangfire");
-if (!string.IsNullOrWhiteSpace(hangfireConnectionString))
-{
-    builder.Services.AddHangfire(config => config
-        .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
-        .UseSimpleAssemblyNameTypeSerializer()
-        .UseRecommendedSerializerSettings()
-        .UseSqlServerStorage(hangfireConnectionString, new SqlServerStorageOptions
-        {
-            PrepareSchemaIfNecessary = true
-        }));
-    builder.Services.AddHangfireServer();
-}
-
-var app = builder.Build();
-
 if (args.Any(arg => string.Equals(arg, "--run-once", StringComparison.OrdinalIgnoreCase)))
 {
-    await app.Services.GetRequiredService<ExcelImportJob>().RunAsync();
+    using var runOnceHost = builder.Build();
+    await runOnceHost.Services.GetRequiredService<ExcelImportJob>().RunAsync();
     return;
 }
 
-if (!string.IsNullOrWhiteSpace(hangfireConnectionString))
-{
-    app.UseHangfireDashboard();
+builder.Services.AddHostedService<DailyExcelImportWorker>();
 
-    var options = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<ExcelImportOptions>>().Value;
-    RecurringJob.AddOrUpdate<ExcelImportJob>(
-        "store-data-to-temp-xlsx",
-        job => job.RunAsync(),
-        options.DailyCron,
-        new RecurringJobOptions { TimeZone = TimeZoneInfo.Local });
-}
-
-app.MapGet("/", () => "OperateExcel job is running.");
-app.MapPost("/run", async (ExcelImportJob job) =>
-{
-    var result = await job.RunAsync();
-    return Results.Ok(result);
-});
-
-await app.RunAsync();
+await builder.Build().RunAsync();
