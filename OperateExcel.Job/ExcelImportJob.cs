@@ -38,6 +38,7 @@ public sealed class ExcelImportJob
     private const int PaymentSecondDailySummaryColumnCount = 19; // Excel columns O:AG.
     private const int StoreDailySummaryStartColumnIndex = 14; // Excel column O.
     private const int StoreDailySummaryColumnCount = 16; // Excel columns O:AD.
+    private const int DateColumnWidth = 12 * 256;
 
     private static readonly IReadOnlyDictionary<string, string> SheetSourceExtensions =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -625,11 +626,17 @@ public sealed class ExcelImportJob
         var copiedFulfillmentRows = CopyFilteredFulfillmentRowsToTemplate(workbook, formatter, cellStyleCache);
         var copiedPaymentRows = CopyOrderPaymentRowsToTemplate(workbook, formatter, cellStyleCache);
         UpsertStorePersonRelationSheet(workbook, cellStyleCache);
+        if (processingDate.Day == 1)
+        {
+            ClearMonthlyDailySummarySheets(workbook);
+            messages.Add($"Cleared monthly daily summary data for {processingDate:yyyy-MM-dd}.");
+        }
+
         var generatedFulfillmentSummary = GenerateFulfillmentSummaryTemplates(workbook);
         var storeDailyMetrics = BuildStoreDailySummaryMetrics(workbook, formatter);
         var appendedStoreDailySummaryRows = AppendStoreDailySummarySheets(workbook, processingDate, storeDailyMetrics, cellStyleCache);
         var generatedPaymentSummaryBlocks = GeneratePaymentSummaryTemplates(workbook);
-        var generatedDailySummaryRows = AppendDailySummaryTemplates(workbook, processingDate, generatedFulfillmentSummary, formatter);
+        var generatedDailySummaryRows = AppendDailySummaryTemplates(workbook, processingDate, generatedFulfillmentSummary, formatter, cellStyleCache);
         MarkWorkbookForFormulaRecalculation(workbook);
 
         messages.Add($"Highlighted {highlightedOrderIds} fulfillment rows from {WaitingOrderFileName}.");
@@ -640,6 +647,77 @@ public sealed class ExcelImportJob
         messages.Add($"Appended {appendedStoreDailySummaryRows} rows to store daily summary sheets.");
         messages.Add($"Generated {generatedPaymentSummaryBlocks} payment summary templates from row {PaymentStoreSummaryStartRowIndex + 1}.");
         messages.Add($"Appended {generatedDailySummaryRows} rows to sheet {SummarySheetName}.");
+    }
+
+    private static void ClearMonthlyDailySummarySheets(IWorkbook workbook)
+    {
+        var summarySheet = workbook.GetSheet(SummarySheetName);
+        if (summarySheet is not null)
+        {
+            ClearSheetDataRange(
+                summarySheet,
+                1,
+                PaymentFirstDailySummaryStartColumnIndex,
+                PaymentFirstDailySummaryColumnCount);
+            ClearSheetDataRange(
+                summarySheet,
+                1,
+                PaymentSecondDailySummaryStartColumnIndex,
+                PaymentSecondDailySummaryColumnCount);
+        }
+
+        foreach (var store in FulfillmentSummaryStores)
+        {
+            var storeSheet = FindSheet(workbook, store);
+            if (storeSheet is null)
+            {
+                continue;
+            }
+
+            ClearSheetDataRange(
+                storeSheet,
+                1,
+                PaymentFirstDailySummaryStartColumnIndex,
+                PaymentFirstDailySummaryColumnCount);
+            ClearSheetDataRange(
+                storeSheet,
+                1,
+                StoreDailySummaryStartColumnIndex,
+                StoreDailySummaryColumnCount);
+        }
+    }
+
+    private static void ClearSheetDataRange(
+        ISheet sheet,
+        int startRowIndex,
+        int startColumnIndex,
+        int columnCount)
+    {
+        if (sheet.LastRowNum < startRowIndex)
+        {
+            return;
+        }
+
+        var endColumnIndex = startColumnIndex + columnCount - 1;
+        for (var rowIndex = startRowIndex; rowIndex <= sheet.LastRowNum; rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row is null)
+            {
+                continue;
+            }
+
+            for (var columnIndex = startColumnIndex; columnIndex <= endColumnIndex; columnIndex++)
+            {
+                var cell = row.GetCell(columnIndex);
+                if (cell is not null)
+                {
+                    row.RemoveCell(cell);
+                }
+            }
+        }
+
+        RemoveMergedRegionsInRange(sheet, startRowIndex, sheet.LastRowNum, startColumnIndex, endColumnIndex);
     }
 
     private HashSet<string> ReadWaitingOrderIds(DateOnly processingDate, DataFormatter formatter)
@@ -1032,14 +1110,18 @@ public sealed class ExcelImportJob
                 PaymentFirstDailySummaryStartColumnIndex,
                 PaymentFirstDailySummaryColumnCount);
             var nextSummaryRowIndex = FindNextStoreSummaryAppendRowIndex(targetSheet);
-            var templateRow = ResolveStoreDailySummaryTemplateRow(targetSheet, nextSummaryRowIndex);
 
             foreach (var person in storePeople)
             {
                 var detailRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
-                CopyRowStyle(templateRow, detailRow, 0, 0, PaymentFirstDailySummaryColumnCount);
+                ApplyStoreDailySummaryDetailStyle(
+                    detailRow,
+                    PaymentFirstDailySummaryStartColumnIndex,
+                    PaymentFirstDailySummaryColumnCount,
+                    cellStyleCache,
+                    hasBorder: false);
 
-                SetDateCell(detailRow, 0, processingDate);
+                SetDateCell(detailRow, 0, processingDate, cellStyleCache);
                 SetStringCell(detailRow, 1, person);
                 var metrics = storeDailyMetrics.TryGetValue(store, out var metricsByPerson)
                     && metricsByPerson.TryGetValue(person, out var personMetrics)
@@ -1048,8 +1130,13 @@ public sealed class ExcelImportJob
                 SetDailySummaryMetricCells(detailRow, metrics);
 
                 var summaryRow = targetSheet.GetRow(nextSummaryRowIndex) ?? targetSheet.CreateRow(nextSummaryRowIndex);
-                CopyRowStyle(templateRow, summaryRow, StoreDailySummaryStartColumnIndex, StoreDailySummaryStartColumnIndex, StoreDailySummaryColumnCount);
-                SetDateCell(summaryRow, StoreDailySummaryStartColumnIndex, processingDate);
+                ApplyStoreDailySummaryDetailStyle(
+                    summaryRow,
+                    StoreDailySummaryStartColumnIndex,
+                    StoreDailySummaryColumnCount,
+                    cellStyleCache,
+                    hasBorder: true);
+                SetDateCell(summaryRow, StoreDailySummaryStartColumnIndex, processingDate, cellStyleCache);
                 SetStringCell(summaryRow, StoreDailySummaryStartColumnIndex + 1, person);
                 SetStoreDailySummaryFormulaCells(summaryRow);
 
@@ -1059,13 +1146,12 @@ public sealed class ExcelImportJob
             }
 
             var totalRow = targetSheet.GetRow(nextSummaryRowIndex) ?? targetSheet.CreateRow(nextSummaryRowIndex);
-            CopyRowStyle(templateRow, totalRow, StoreDailySummaryStartColumnIndex, StoreDailySummaryStartColumnIndex, StoreDailySummaryColumnCount);
             SetStringCell(totalRow, StoreDailySummaryStartColumnIndex, "\u5408\u8ba1");
             SetStoreDailySummaryTotalFormulas(
                 totalRow,
                 nextSummaryRowIndex - storePeople.Count,
                 nextSummaryRowIndex - 1);
-            ApplyStoreDailySummaryTotalStyle(targetSheet, totalRow);
+            ApplyStoreDailySummaryTotalStyle(targetSheet, totalRow, cellStyleCache);
             nextSummaryRowIndex++;
             ClearBlankStoreDailySummaryTemplateRows(targetSheet, nextSummaryRowIndex);
         }
@@ -1075,6 +1161,8 @@ public sealed class ExcelImportJob
 
     private static void EnsureStoreDailySummaryHeaders(ISheet sheet, CellStyleCache cellStyleCache)
     {
+        EnsureDateColumnWidths(sheet);
+
         var headerRow = sheet.GetRow(0) ?? sheet.CreateRow(0);
         for (var i = 0; i < PaymentDailySummaryHeaders.Count; i++)
         {
@@ -1094,23 +1182,6 @@ public sealed class ExcelImportJob
                 SetCellValue(headerRow.CreateCell(columnIndex), StoreDailySummaryHeaders[i], cellStyleCache);
             }
         }
-    }
-
-    private static IRow? ResolveStoreDailySummaryTemplateRow(ISheet sheet, int targetRowIndex)
-    {
-        var sameRow = sheet.GetRow(targetRowIndex);
-        if (sameRow is not null && HasFormulaInRange(sameRow, StoreDailySummaryStartColumnIndex, StoreDailySummaryColumnCount))
-        {
-            return sameRow;
-        }
-
-        var previousRow = targetRowIndex > 1 ? sheet.GetRow(targetRowIndex - 1) : null;
-        if (previousRow is not null)
-        {
-            return previousRow;
-        }
-
-        return sheet.GetRow(1);
     }
 
     private static int FindNextStoreSummaryAppendRowIndex(ISheet sheet)
@@ -1171,19 +1242,6 @@ public sealed class ExcelImportJob
         return false;
     }
 
-    private static bool HasFormulaInRange(IRow row, int startColumnIndex, int columnCount)
-    {
-        for (var columnIndex = startColumnIndex; columnIndex < startColumnIndex + columnCount; columnIndex++)
-        {
-            if (row.GetCell(columnIndex)?.CellType == CellType.Formula)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private static void SetStoreDailySummaryFormulaCells(IRow row)
     {
         var rowNumber = row.RowNum + 1;
@@ -1225,35 +1283,27 @@ public sealed class ExcelImportJob
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
     }
 
-    private static void ApplyStoreDailySummaryTotalStyle(ISheet sheet, IRow totalRow)
+    private static void ApplyStoreDailySummaryDetailStyle(
+        IRow row,
+        int startColumnIndex,
+        int columnCount,
+        CellStyleCache cellStyleCache,
+        bool hasBorder)
     {
-        var workbook = sheet.Workbook;
+        for (var columnIndex = startColumnIndex;
+             columnIndex < startColumnIndex + columnCount;
+             columnIndex++)
+        {
+            var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
+            cell.CellStyle = cellStyleCache.GetStoreDailyDetailStyle(hasBorder);
+        }
+    }
+
+    private static void ApplyStoreDailySummaryTotalStyle(ISheet sheet, IRow totalRow, CellStyleCache cellStyleCache)
+    {
         var titleRow = sheet.GetRow(0);
         var titleCell = titleRow?.GetCell(StoreDailySummaryStartColumnIndex);
-        var totalStyle = workbook.CreateCellStyle();
-        if (titleCell is not null)
-        {
-            totalStyle.CloneStyleFrom(titleCell.CellStyle);
-        }
-
-        totalStyle.Alignment = HorizontalAlignment.Center;
-        totalStyle.VerticalAlignment = VerticalAlignment.Center;
-
-        var font = workbook.CreateFont();
-        if (titleCell is not null)
-        {
-            var titleFont = workbook.GetFontAt(titleCell.CellStyle.FontIndex);
-            font.FontName = titleFont.FontName;
-            font.FontHeightInPoints = titleFont.FontHeightInPoints;
-            font.Color = titleFont.Color;
-            font.IsBold = true;
-        }
-        else
-        {
-            font.IsBold = true;
-        }
-
-        totalStyle.SetFont(font);
+        var totalStyle = cellStyleCache.GetStoreDailyTotalStyle(titleCell?.CellStyle);
 
         for (var columnIndex = StoreDailySummaryStartColumnIndex;
              columnIndex < StoreDailySummaryStartColumnIndex + StoreDailySummaryColumnCount;
@@ -1557,6 +1607,32 @@ public sealed class ExcelImportJob
         }
     }
 
+    private static void EnsureDateColumnWidths(ISheet sheet)
+    {
+        sheet.SetColumnWidth(PaymentFirstDailySummaryStartColumnIndex, DateColumnWidth);
+        sheet.SetColumnWidth(StoreDailySummaryStartColumnIndex, DateColumnWidth);
+    }
+
+    private static void RemoveMergedRegionsInRange(
+        ISheet sheet,
+        int firstRow,
+        int lastRow,
+        int firstColumn,
+        int lastColumn)
+    {
+        for (var i = sheet.NumMergedRegions - 1; i >= 0; i--)
+        {
+            var existing = sheet.GetMergedRegion(i);
+            if (existing.FirstRow >= firstRow
+                && existing.LastRow <= lastRow
+                && existing.FirstColumn >= firstColumn
+                && existing.LastColumn <= lastColumn)
+            {
+                sheet.RemoveMergedRegion(i);
+            }
+        }
+    }
+
     private static ICellStyle CreateGeneratedSummaryStyle(
         IWorkbook workbook,
         GeneratedSummaryRowKind rowKind,
@@ -1655,7 +1731,8 @@ public sealed class ExcelImportJob
         IWorkbook workbook,
         DateOnly processingDate,
         FulfillmentSummaryGenerationResult fulfillmentSummary,
-        DataFormatter formatter)
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
     {
         var summarySheet = workbook.GetSheet(SummarySheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {SummarySheetName}");
@@ -1666,14 +1743,16 @@ public sealed class ExcelImportJob
             summarySheet,
             processingDate,
             firstSummaryRowIndex,
-            dailyMetrics);
+            dailyMetrics,
+            cellStyleCache);
 
         var secondSummaryFirstRowIndex = FindNextSecondDailySummaryRowIndex(summarySheet);
         AppendSecondDailySummaryRows(
             summarySheet,
             processingDate,
             secondSummaryFirstRowIndex,
-            formatter);
+            formatter,
+            cellStyleCache);
 
         return FulfillmentSummaryPeople.Count + FulfillmentSummaryPeople.Count + 1;
     }
@@ -2246,7 +2325,8 @@ public sealed class ExcelImportJob
         ISheet summarySheet,
         DateOnly processingDate,
         int startRowIndex,
-        IReadOnlyDictionary<string, DailySummaryMetrics> dailyMetrics)
+        IReadOnlyDictionary<string, DailySummaryMetrics> dailyMetrics,
+        CellStyleCache cellStyleCache)
     {
         var styleRow = summarySheet.GetRow(Math.Max(1, startRowIndex - 1)) ?? summarySheet.GetRow(1);
         var targetHeaderIndex = ReadHeaderIndexAtColumns(
@@ -2261,7 +2341,7 @@ public sealed class ExcelImportJob
             var targetRow = summarySheet.GetRow(targetRowIndex) ?? summarySheet.CreateRow(targetRowIndex);
             CopyRowStyle(styleRow, targetRow, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryColumnCount);
 
-            SetDateCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u65e5\u671f", SummarySheetName), processingDate);
+            SetDateCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u65e5\u671f", SummarySheetName), processingDate, cellStyleCache);
             SetStringCell(targetRow, ResolveRequiredColumn(targetHeaderIndex, "\u59d3\u540d", SummarySheetName), personName);
 
             dailyMetrics.TryGetValue(personName, out var metrics);
@@ -2301,11 +2381,14 @@ public sealed class ExcelImportJob
         ISheet summarySheet,
         DateOnly processingDate,
         int startRowIndex,
-        DataFormatter formatter)
+        DataFormatter formatter,
+        CellStyleCache cellStyleCache)
     {
         var templatePersonRow = FindSecondDailySummaryTemplatePersonRow(summarySheet, formatter)
-            ?? throw new InvalidOperationException($"No second summary template row found in sheet: {SummarySheetName}");
-        var lastTotalRowIndex = FindLastTotalRowIndex(summarySheet, PaymentSecondDailySummaryStartColumnIndex);
+            ?? summarySheet.GetRow(Math.Max(1, startRowIndex - 1))
+            ?? summarySheet.GetRow(1)
+            ?? summarySheet.GetRow(0);
+        var lastTotalRowIndex = TryFindLastTotalRowIndex(summarySheet, PaymentSecondDailySummaryStartColumnIndex);
 
         for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
         {
@@ -2313,14 +2396,16 @@ public sealed class ExcelImportJob
             var targetRowIndex = startRowIndex + i;
             var targetRow = summarySheet.GetRow(targetRowIndex) ?? summarySheet.CreateRow(targetRowIndex);
             CopyRowStyle(templatePersonRow, targetRow, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryColumnCount);
-            SetDateCell(targetRow, PaymentSecondDailySummaryStartColumnIndex, processingDate);
+            SetDateCell(targetRow, PaymentSecondDailySummaryStartColumnIndex, processingDate, cellStyleCache);
             SetStringCell(targetRow, PaymentSecondDailySummaryStartColumnIndex + 1, personName);
             SetSecondDailySummaryPersonFormulas(targetRow, personName);
         }
 
         var totalRowIndex = startRowIndex + FulfillmentSummaryPeople.Count;
         var totalRow = summarySheet.GetRow(totalRowIndex) ?? summarySheet.CreateRow(totalRowIndex);
-        var templateTotalRow = summarySheet.GetRow(lastTotalRowIndex) ?? templatePersonRow;
+        var templateTotalRow = lastTotalRowIndex >= 0
+            ? summarySheet.GetRow(lastTotalRowIndex) ?? templatePersonRow
+            : templatePersonRow;
         CopyRowStyle(templateTotalRow, totalRow, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryColumnCount);
         SetStringCell(totalRow, PaymentSecondDailySummaryStartColumnIndex, "\u5408\u8ba1");
         SetSecondDailySummaryTotalFormulas(totalRow, startRowIndex, totalRowIndex - 1);
@@ -2392,10 +2477,22 @@ public sealed class ExcelImportJob
 
     private static int FindNextSecondDailySummaryRowIndex(ISheet sheet)
     {
-        return FindLastTotalRowIndex(sheet, PaymentSecondDailySummaryStartColumnIndex) + 1;
+        var lastTotalRowIndex = TryFindLastTotalRowIndex(sheet, PaymentSecondDailySummaryStartColumnIndex);
+        return lastTotalRowIndex >= 0 ? lastTotalRowIndex + 1 : 1;
     }
 
     private static int FindLastTotalRowIndex(ISheet sheet, int columnIndex)
+    {
+        var rowIndex = TryFindLastTotalRowIndex(sheet, columnIndex);
+        if (rowIndex >= 0)
+        {
+            return rowIndex;
+        }
+
+        throw new InvalidOperationException($"No total row found in sheet: {sheet.SheetName}");
+    }
+
+    private static int TryFindLastTotalRowIndex(ISheet sheet, int columnIndex)
     {
         for (var rowIndex = sheet.LastRowNum; rowIndex >= 1; rowIndex--)
         {
@@ -2407,7 +2504,7 @@ public sealed class ExcelImportJob
             }
         }
 
-        throw new InvalidOperationException($"No total row found in sheet: {sheet.SheetName}");
+        return -1;
     }
 
     private static int FindNextAppendRowIndex(ISheet sheet, int startColumnIndex, int columnCount)
@@ -2453,10 +2550,11 @@ public sealed class ExcelImportJob
         return index;
     }
 
-    private static void SetDateCell(IRow row, int columnIndex, DateOnly date)
+    private static void SetDateCell(IRow row, int columnIndex, DateOnly date, CellStyleCache cellStyleCache)
     {
         var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
         cell.SetCellValue(date.ToDateTime(TimeOnly.MinValue));
+        cell.CellStyle = cellStyleCache.GetDateStyle(cell.CellStyle);
     }
 
     private static void CopyRowStyle(IRow? sourceRow, IRow targetRow, int sourceStartColumnIndex, int targetStartColumnIndex, int columnCount)
@@ -3719,6 +3817,9 @@ public sealed class ExcelImportJob
         private readonly IDataFormat _dataFormat;
         private readonly Dictionary<string, ICellStyle> _styles = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<short, ICellStyle> _redFontStyles = new();
+        private readonly Dictionary<short, ICellStyle> _dateStyles = new();
+        private readonly Dictionary<short, ICellStyle> _plainStyles = new();
+        private readonly Dictionary<short, ICellStyle> _storeDailyTotalStyles = new();
 
         public CellStyleCache(IWorkbook workbook)
         {
@@ -3760,6 +3861,155 @@ public sealed class ExcelImportJob
             return style;
         }
 
+        public ICellStyle GetDateStyle(ICellStyle? baseStyle)
+        {
+            var baseStyleIndex = baseStyle?.Index ?? 0;
+            if (_dateStyles.TryGetValue(baseStyleIndex, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            if (baseStyle is not null)
+            {
+                style.CloneStyleFrom(baseStyle);
+            }
+
+            style.DataFormat = _dataFormat.GetFormat(ResolveFormat("date"));
+            _dateStyles.Add(baseStyleIndex, style);
+            return style;
+        }
+
+        public ICellStyle GetStoreDailyDetailStyle(bool hasBorder)
+        {
+            var key = hasBorder ? "store-daily-detail-bordered" : "store-daily-detail";
+            if (_styles.TryGetValue(key, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            ApplyStoreDailyAlignment(style);
+            if (hasBorder)
+            {
+                ApplyThinBorder(style);
+            }
+
+            style.FillPattern = FillPattern.NoFill;
+            _styles.Add(key, style);
+            return style;
+        }
+
+        public ICellStyle GetStoreDailyTotalStyle(ICellStyle? headerStyle)
+        {
+            var headerStyleIndex = headerStyle?.Index ?? 0;
+            if (_storeDailyTotalStyles.TryGetValue(headerStyleIndex, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            ApplyStoreDailyAlignment(style);
+            ApplyThinBorder(style);
+            if (headerStyle is not null)
+            {
+                style.FillPattern = headerStyle.FillPattern;
+                style.FillForegroundColor = headerStyle.FillForegroundColor;
+                style.FillBackgroundColor = headerStyle.FillBackgroundColor;
+                CopyXssfFillColors(headerStyle, style);
+            }
+
+            _storeDailyTotalStyles.Add(headerStyleIndex, style);
+            return style;
+        }
+
+        public ICellStyle GetPlainStyle(ICellStyle? baseStyle)
+        {
+            var baseStyleIndex = baseStyle?.Index ?? 0;
+            if (_plainStyles.TryGetValue(baseStyleIndex, out var style))
+            {
+                return style;
+            }
+
+            style = _workbook.CreateCellStyle();
+            if (baseStyle is not null)
+            {
+                style.CloneStyleFrom(baseStyle);
+                style.SetFont(CreateNonBoldFont(baseStyle));
+            }
+
+            style.FillPattern = FillPattern.NoFill;
+            _plainStyles.Add(baseStyleIndex, style);
+            return style;
+        }
+
+        private IFont CreateNonBoldFont(ICellStyle baseStyle)
+        {
+            var baseFont = _workbook.GetFontAt(baseStyle.FontIndex);
+            var font = _workbook.CreateFont();
+            font.FontName = baseFont.FontName;
+            font.FontHeightInPoints = baseFont.FontHeightInPoints;
+            font.Color = baseFont.Color;
+            font.IsItalic = baseFont.IsItalic;
+            font.Underline = baseFont.Underline;
+            font.TypeOffset = baseFont.TypeOffset;
+            font.IsStrikeout = baseFont.IsStrikeout;
+            font.IsBold = false;
+            return font;
+        }
+
+        private static void ApplyStoreDailyAlignment(ICellStyle style)
+        {
+            style.Alignment = HorizontalAlignment.Center;
+            style.VerticalAlignment = VerticalAlignment.Center;
+        }
+
+        private static void ApplyThinBorder(ICellStyle style)
+        {
+            style.BorderTop = BorderStyle.Thin;
+            style.BorderRight = BorderStyle.Thin;
+            style.BorderBottom = BorderStyle.Thin;
+            style.BorderLeft = BorderStyle.Thin;
+        }
+
+        private static void CopyXssfFillColors(ICellStyle sourceStyle, ICellStyle targetStyle)
+        {
+            var sourceType = sourceStyle.GetType();
+            var targetType = targetStyle.GetType();
+            if (!sourceType.Name.Contains("XSSFCellStyle", StringComparison.Ordinal)
+                || !targetType.Name.Contains("XSSFCellStyle", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            CopyXssfColor(
+                sourceType.GetProperty("FillForegroundXSSFColor")?.GetValue(sourceStyle),
+                targetStyle,
+                targetType,
+                "SetFillForegroundColor");
+            CopyXssfColor(
+                sourceType.GetProperty("FillBackgroundXSSFColor")?.GetValue(sourceStyle),
+                targetStyle,
+                targetType,
+                "SetFillBackgroundColor");
+        }
+
+        private static void CopyXssfColor(object? color, ICellStyle targetStyle, Type targetType, string methodName)
+        {
+            if (color is null)
+            {
+                return;
+            }
+
+            var method = targetType
+                .GetMethods()
+                .FirstOrDefault(methodInfo =>
+                    string.Equals(methodInfo.Name, methodName, StringComparison.Ordinal)
+                    && methodInfo.GetParameters().Length == 1
+                    && methodInfo.GetParameters()[0].ParameterType.IsAssignableFrom(color.GetType()));
+            method?.Invoke(targetStyle, [color]);
+        }
+
         private static string ResolveFormat(string key)
         {
             if (string.Equals(key, "percent", StringComparison.OrdinalIgnoreCase))
@@ -3769,7 +4019,7 @@ public sealed class ExcelImportJob
 
             if (string.Equals(key, "date", StringComparison.OrdinalIgnoreCase))
             {
-                return "m/d/yyyy";
+                return "m\"月\"d\"日\"";
             }
 
             if (key.StartsWith("currency:", StringComparison.OrdinalIgnoreCase))
