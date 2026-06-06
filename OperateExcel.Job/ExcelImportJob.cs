@@ -63,65 +63,49 @@ public sealed class ExcelImportJob
 
     private static readonly IReadOnlyList<string> StoreReadOrder =
     [
-        "\u65e0\u5fe7\u65e0\u8651",
-        "Oyumoents",
-        "Yue an Company",
-        "DUX"
+        "DU",
+        "ming",
+        "ADOLIX"
     ];
 
     private static readonly IReadOnlyList<string> FulfillmentSummaryPeople =
     [
-        "\u83ab\u7f8e\u7389",
-        "\u4e01\u82b3\u82b3",
-        "\u6b27\u9633\u535a\u6587",
-        "\u5176\u4ed6",
-        "\u8bb8\u6893\u6e1d",
-        "\u8c2d\u71b9\u6770",
-        "\u5510\u7487\u6dd1",
-        "\u674e\u5c0f\u5a49",
-        "\u6731\u5c0f\u71d5"
+        "\u4ed8\u6c5f\u723d",
+        "\u9f99\u6768",
+        "DD",
+        "\u674e\u6167"
     ];
 
     private static readonly IReadOnlyList<string> FulfillmentSummaryStores =
     [
-        "\u65e0\u5fe7\u65e0\u8651",
-        "OYU",
-        "AN",
-        "DUX"
+        "DU",
+        "MING",
+        "Adolix"
     ];
 
     private static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> StorePeople =
         new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["\u65e0\u5fe7\u65e0\u8651"] =
+            ["DU"] =
             [
-                "\u83ab\u7f8e\u7389",
-                "\u4e01\u82b3\u82b3",
-                "\u6b27\u9633\u535a\u6587",
-                "\u5176\u4ed6",
-                "\u8bb8\u6893\u6e1d",
-                "\u8c2d\u71b9\u6770"
+                "\u4ed8\u6c5f\u723d",
+                "\u9f99\u6768",
+                "DD",
+                "\u674e\u6167"
             ],
-            ["AN"] =
+            ["MING"] =
             [
-                "\u83ab\u7f8e\u7389",
-                "\u5176\u4ed6",
-                "\u8c2d\u71b9\u6770",
-                "\u6731\u5c0f\u71d5"
+                "\u4ed8\u6c5f\u723d",
+                "\u9f99\u6768",
+                "DD",
+                "\u674e\u6167"
             ],
-            ["OYU"] =
+            ["Adolix"] =
             [
-                "\u8bb8\u6893\u6e1d",
-                "\u8c2d\u71b9\u6770",
-                "\u674e\u5c0f\u5a49"
-            ],
-            ["DUX"] =
-            [
-                "\u4e01\u82b3\u82b3",
-                "\u6b27\u9633\u535a\u6587",
-                "\u8bb8\u6893\u6e1d",
-                "\u8c2d\u71b9\u6770",
-                "\u5510\u7487\u6dd1"
+                "\u4ed8\u6c5f\u723d",
+                "\u9f99\u6768",
+                "DD",
+                "\u674e\u6167"
             ]
         };
 
@@ -182,33 +166,25 @@ public sealed class ExcelImportJob
     private static readonly IReadOnlyDictionary<string, double> PaymentMonthlyBudgetByPerson =
         new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
         {
-            ["\u83ab\u7f8e\u7389"] = 522425D,
-            ["\u4e01\u82b3\u82b3"] = 428121D,
-            ["\u6b27\u9633\u535a\u6587"] = 504162D,
-            ["\u5176\u4ed6"] = 0D,
-            ["\u8bb8\u6893\u6e1d"] = 0D,
-            ["\u8c2d\u71b9\u6770"] = 221994D,
-            ["\u5510\u7487\u6dd1"] = 145832D,
-            ["\u674e\u5c0f\u5a49"] = 0D,
-            ["\u6731\u5c0f\u71d5"] = 0D
+            ["\u4ed8\u6c5f\u723d"] = 0D,
+            ["\u9f99\u6768"] = 0D,
+            ["DD"] = 0D,
+            ["\u674e\u6167"] = 0D
         };
 
     private static readonly IReadOnlyDictionary<string, string> StoreAccountNames =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["\u65e0\u5fe7\u65e0\u8651"] = "\u65e0\u5fe7\u65e0\u8651",
-            ["Oyumoents"] = "OYU",
-            ["Yue an Company"] = "AN",
-            ["Dux"] = "DUX",
-            ["DUX"] = "DUX"
+            ["DU"] = "DU",
+            ["ming"] = "MING",
+            ["ADOLIX"] = "Adolix"
         };
 
     private static readonly IReadOnlyList<MappingSourceSheet> MappingSourceSheets =
     [
-        new("\u65e0\u5fe7\u65e0\u8651", ["WUYOU", "\u65e0\u5fe7\u65e0\u8651"]),
-        new("OYU", ["OYUMOENTS \u6620\u5c04", "OYUMOENTS\u6620\u5c04", "OYUMOENTS \u6620\u5c04\u8868", "OYUMOENTS\u6620\u5c04\u8868"]),
-        new("AN", ["AN\u6620\u5c04\u8868", "AN \u6620\u5c04\u8868", "AN\u6620\u5c04", "AN \u6620\u5c04"]),
-        new("DUX", ["DUX \u6620\u5c04", "DUX\u6620\u5c04", "DUX \u6620\u5c04\u8868", "DUX\u6620\u5c04\u8868"])
+        new("DU", ["Du"]),
+        new("MING", ["ming"]),
+        new("Adolix", ["ADOLIX"])
     ];
 
     private static readonly IReadOnlySet<string> MappingImportHeaders =
@@ -963,9 +939,9 @@ public sealed class ExcelImportJob
 
         ClearGeneratedFulfillmentSummaryArea(sheet);
 
-        var storeHeaderStyleRow = sheet.GetRow(1302); // Existing DUX header row, Excel row 1303.
-        var storePersonStyleRow = sheet.GetRow(1303); // Existing DUX first person row, Excel row 1304.
-        var storeTotalStyleRow = sheet.GetRow(1314); // Existing DUX total row, Excel row 1315.
+        var storeHeaderStyleRow = sheet.GetRow(1302); // Existing store header row, Excel row 1303.
+        var storePersonStyleRow = sheet.GetRow(1303); // Existing store first person row, Excel row 1304.
+        var storeTotalStyleRow = sheet.GetRow(1314); // Existing store total row, Excel row 1315.
         var summaryTitleStyleRow = sheet.GetRow(1321); // Existing summary title row, Excel row 1322.
         var summaryHeaderStyleRow = sheet.GetRow(1322); // Existing summary header row, Excel row 1323.
         var summaryPersonStyleRow = sheet.GetRow(1323); // Existing summary first person row, Excel row 1324.
@@ -1511,9 +1487,9 @@ public sealed class ExcelImportJob
 
         ClearGeneratedPaymentSummaryArea(sheet);
 
-        var headerStyleRow = sheet.GetRow(1486); // Existing DUX header row, Excel row 1487.
-        var personStyleRow = sheet.GetRow(1487); // Existing DUX first person row, Excel row 1488.
-        var totalStyleRow = sheet.GetRow(1498); // Existing DUX total row, Excel row 1499.
+        var headerStyleRow = sheet.GetRow(1486); // Existing store header row, Excel row 1487.
+        var personStyleRow = sheet.GetRow(1487); // Existing store first person row, Excel row 1488.
+        var totalStyleRow = sheet.GetRow(1498); // Existing store total row, Excel row 1499.
 
         var nextRowIndex = PaymentStoreSummaryStartRowIndex;
         foreach (var store in FulfillmentSummaryStores)
@@ -3078,6 +3054,11 @@ public sealed class ExcelImportJob
                     var value = column.SourceColumnIndex < sourceRow.Count
                         ? sourceRow[column.SourceColumnIndex]
                         : string.Empty;
+
+                    if (string.Equals(column.Header, "\u5e73\u53f0SKU", StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = value.Trim();
+                    }
 
                     SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
                 }

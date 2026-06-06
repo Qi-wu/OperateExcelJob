@@ -5,10 +5,10 @@ public sealed class FeishuOptions
     public bool Enabled { get; set; } = true;
     public string AppId { get; set; } = string.Empty;
     public string AppSecret { get; set; } = string.Empty;
-    public string WikiUrl { get; set; } = "https://bcnt3e3uyrxk.feishu.cn/wiki/TPsJw75WriCKtTkMNjscSwU0nAe?table=tbl7Bz3tw6FvEJHW&view=vewbgLs0Mv";
-    public string? BitableAppToken { get; set; }
-    public string? TableId { get; set; }
-    public string? ViewId { get; set; }
+    public string WikiUrl { get; set; } = "https://bcnt3e3uyrxk.feishu.cn/base/T45fbKkq1azywosncEOcF8fynsY?table=tbldlsREWMxiL8sC&view=vewEfMbIRP";
+    public string? BitableAppToken { get; set; } = "T45fbKkq1azywosncEOcF8fynsY";
+    public string? TableId { get; set; } = "tbldlsREWMxiL8sC";
+    public string? ViewId { get; set; } = "vewEfMbIRP";
     public string DateFieldName { get; set; } = "\u65e5\u671f";
     public string AttachmentFieldName { get; set; } = "\u635f\u76ca\u8868";
     public string MappingAttachmentFieldName { get; set; } = "\u6620\u5c04\u8868";
@@ -19,12 +19,11 @@ public sealed class FeishuOptions
     public string SourceSheetName { get; set; } = "B2BOL";
     public string TargetSheetName { get; set; } = "B2B\uff08ol)";
     public string MappingTargetSheetName { get; set; } = "\u6620\u5c04\u8868";
-    public string MappingSpreadsheetUrl { get; set; } = "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd";
+    public string MappingSpreadsheetUrl { get; set; } = "https://bcnt3e3uyrxk.feishu.cn/wiki/OVeOwY8nFiEaLokfPrlceAjinbe";
     public string[] MappingSpreadsheetSheetUrls { get; set; } =
     [
-        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=79edea",
-        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=JLQ3Ie",
-        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=PKwiQn",
-        "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd?sheet=G8R0HR"
+        "https://bcnt3e3uyrxk.feishu.cn/wiki/OVeOwY8nFiEaLokfPrlceAjinbe?sheet=0146aa",
+        "https://bcnt3e3uyrxk.feishu.cn/wiki/OVeOwY8nFiEaLokfPrlceAjinbe?sheet=F4lcCs",
+        "https://bcnt3e3uyrxk.feishu.cn/wiki/OVeOwY8nFiEaLokfPrlceAjinbe?sheet=nlYgkl"
     ];
 }

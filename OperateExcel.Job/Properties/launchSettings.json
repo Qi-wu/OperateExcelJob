@@ -2,6 +2,7 @@
   "profiles": {
     "OperateExcel.Job": {
       "commandName": "Project",
+      "commandLineArgs": "--run-once --date=2026-06-02",
       "launchBrowser": true,
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
