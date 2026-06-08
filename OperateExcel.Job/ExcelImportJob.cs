@@ -3055,7 +3055,8 @@ public sealed class ExcelImportJob
                         ? sourceRow[column.SourceColumnIndex]
                         : string.Empty;
 
-                    if (string.Equals(column.Header, "\u5e73\u53f0SKU", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(column.Header, "\u5e73\u53f0SKU", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(column.Header, "B2B Item Code", StringComparison.OrdinalIgnoreCase))
                     {
                         value = value.Trim();
                     }
