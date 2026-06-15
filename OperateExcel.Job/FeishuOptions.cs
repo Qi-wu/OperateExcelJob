@@ -3,6 +3,7 @@ namespace OperateExcel.Job;
 public sealed class FeishuOptions
 {
     public bool Enabled { get; set; } = true;
+    public bool UploadGeneratedAttachmentsEnabled { get; set; } = true;
     public string AppId { get; set; } = string.Empty;
     public string AppSecret { get; set; } = string.Empty;
     public string WikiUrl { get; set; } = "https://bcnt3e3uyrxk.feishu.cn/wiki/TPsJw75WriCKtTkMNjscSwU0nAe?table=tbl7Bz3tw6FvEJHW&view=vewbgLs0Mv";

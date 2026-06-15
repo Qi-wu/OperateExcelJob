@@ -279,11 +279,13 @@ public sealed class ExcelImportJob
 
     public async Task<ImportResult> RunAsync()
     {
+        // NPOI work is CPU/file-system bound and mostly synchronous, so isolate it from the hosted-service loop.
         return await Task.Run(Run);
     }
 
     private ImportResult Run()
     {
+        // One run produces one dated workbook from that date's source folder and then publishes it back to Feishu.
         var messages = new List<string>();
         var processingDate = ResolveProcessingDate();
         var dateFolderName = processingDate.ToString("yyyy-MM-dd");
@@ -296,6 +298,7 @@ public sealed class ExcelImportJob
 
         Directory.CreateDirectory(_options.OutputDirectory);
         var outputFilePath = Path.Combine(_options.OutputDirectory, BuildReportFileName(processingDate));
+        // The new report starts from yesterday's Feishu daily report when enabled, preserving accumulated monthly sheets.
         CreateReportBaseFile(outputFilePath, processingDate, messages);
 
         var storeDirectories = Directory.GetDirectories(sourceDirectory);
@@ -312,6 +315,7 @@ public sealed class ExcelImportJob
         var formatter = new DataFormatter();
         var cellStyleCache = new CellStyleCache(workbook);
 
+        // Shared reference sheets must be refreshed before importing transactional rows and calculating summaries.
         ImportB2BOlFromLocalFile(workbook, sourceDirectory, formatter, cellStyleCache, messages);
         ImportMappingFromFeishu(workbook, processingDate, formatter, cellStyleCache, messages);
 
@@ -324,6 +328,7 @@ public sealed class ExcelImportJob
 
         foreach (var (sheetName, extension) in SheetSourceExtensions)
         {
+            // Each store folder contributes one source file per business sheet; columns are matched by normalized headers.
             var targetSheet = workbook.GetSheet(sheetName)
                 ?? throw new InvalidOperationException($"Sheet not found in template: {sheetName}");
 
@@ -361,6 +366,7 @@ public sealed class ExcelImportJob
                         ? DelimitedTableReader.ReadCsv(sourceFile)
                         : DelimitedTableReader.ReadTxt(sourceFile);
 
+                // Only columns that exist in both the incoming store file and the template are written.
                 var sourceIndex = BuildHeaderIndex(sourceTable.Headers);
                 var writableColumns = targetHeaders
                     .Select((header, columnIndex) => new
@@ -390,6 +396,7 @@ public sealed class ExcelImportJob
                     var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
                     foreach (var column in writableColumns)
                     {
+                        // Keep imported values as display-ready values so downstream formulas see the same shape as manual reports.
                         var value = column.SourceColumnIndex < sourceRow.Count
                             ? sourceRow[column.SourceColumnIndex]
                             : string.Empty;
@@ -411,8 +418,10 @@ public sealed class ExcelImportJob
             }
         }
 
+        // Refund rows are appended to a separate RMA workbook only when today's payment data actually contains refunds.
         UpdateRmaApplicationFromRefundPayments(workbook, processingDate, formatter, cellStyleCache, messages);
 
+        // Post-import rules turn raw rows into the operator-facing template sheets, highlights, and daily summary blocks.
         ApplyPostImportRules(workbook, processingDate, formatter, cellStyleCache, messages);
 
         var tempOutput = Path.Combine(
@@ -427,6 +436,7 @@ public sealed class ExcelImportJob
         RemoveStaleCalculationMetadata(tempOutput);
         workbook.Close();
         RemoveReadOnlyAttribute(outputFilePath);
+        // Swap in the temp workbook only after it has been written and calculation metadata has been cleaned.
         File.Move(tempOutput, outputFilePath, overwrite: true);
         UploadDailyReportToFeishu(outputFilePath, processingDate, messages);
 
@@ -455,6 +465,7 @@ public sealed class ExcelImportJob
     {
         if (!_feishuOptions.Enabled)
         {
+            // Offline mode falls back to a local template so development and emergency runs do not depend on Feishu.
             if (!File.Exists(_options.TemplateFilePath))
             {
                 throw new FileNotFoundException("Template file not found.", _options.TemplateFilePath);
@@ -471,6 +482,7 @@ public sealed class ExcelImportJob
             throw new InvalidOperationException("Feishu daily report template import is enabled, but AppId/AppSecret or table configuration is incomplete.");
         }
 
+        // Daily reports are cumulative within the month, so today's report starts from the previous report attachment.
         var templateReportDate = processingDate.AddDays(-1);
         var reportBytes = _feishuClient
             .DownloadDailyReportAttachmentAsync(templateReportDate)
@@ -489,8 +501,17 @@ public sealed class ExcelImportJob
     {
         if (!_feishuOptions.Enabled)
         {
+            // Keep the generated workbook on disk even when Feishu publishing is disabled.
             messages.Add("Skipped Feishu daily report upload: Feishu import is disabled.");
             _logger.LogWarning("Skipped Feishu daily report upload because Feishu import is disabled.");
+            return;
+        }
+
+        if (!_feishuOptions.UploadGeneratedAttachmentsEnabled)
+        {
+            // Keep reading Feishu inputs when enabled, but allow local-only report generation without publishing outputs.
+            messages.Add("Skipped Feishu daily report upload: generated attachment upload is disabled.");
+            _logger.LogWarning("Skipped Feishu daily report upload because generated attachment upload is disabled.");
             return;
         }
 
@@ -521,6 +542,7 @@ public sealed class ExcelImportJob
         var targetSheet = FindSheet(targetWorkbook, _feishuOptions.TargetSheetName)
             ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.TargetSheetName}");
 
+        // The B2BOL source file carries cost/reference data that later feeds procurement and premium calculations.
         var importedRows = CopyTableDataToSheet(sourceTable, targetSheet, formatter, cellStyleCache);
         messages.Add($"Imported {importedRows} rows from local file {Path.GetFileName(sourceFile)} to sheet {_feishuOptions.TargetSheetName}.");
     }
@@ -553,6 +575,7 @@ public sealed class ExcelImportJob
             ?? FindSheet(targetWorkbook, MappingSheetName)
             ?? throw new InvalidOperationException($"Sheet not found in template: {_feishuOptions.MappingTargetSheetName}");
 
+        // Feishu mapping sheets are the source of SKU -> Item Code -> operator ownership used by all summary metrics.
         var importedRows = CopyMappingSpreadsheetSheetsToTarget(sourceSheets, targetSheet, formatter, cellStyleCache);
         messages.Add($"Imported {importedRows} rows from Feishu mapping spreadsheet to sheet {targetSheet.SheetName}.");
     }
@@ -579,17 +602,27 @@ public sealed class ExcelImportJob
         var refundRows = ReadRefundPaymentRows(importedWorkbook, formatter);
         if (refundRows.Count == 0)
         {
+            // No refunds means there is no RMA delta to append or upload for this processing date.
             messages.Add("Skipped Feishu RMA update: no Refund rows found in payments.");
             return;
         }
 
+        if (!_feishuOptions.UploadGeneratedAttachmentsEnabled)
+        {
+            // RMA output is persisted through Feishu today; without upload there is no durable target to write.
+            messages.Add("Skipped Feishu RMA update: generated attachment upload is disabled.");
+            _logger.LogWarning("Skipped Feishu RMA update because generated attachment upload is disabled.");
+            return;
+        }
+
         var sourceRecordDate = processingDate.AddDays(-1);
-        var rmaBytes = _feishuClient
-            .DownloadRmaAttachmentAsync(sourceRecordDate)
+        // Some days have no RMA upload because there were no refunds; reuse the latest prior RMA workbook in that case.
+        var rmaAttachment = _feishuClient
+            .DownloadLatestRmaAttachmentAsync(sourceRecordDate)
             .GetAwaiter()
             .GetResult();
 
-        using var inputStream = new MemoryStream(rmaBytes);
+        using var inputStream = new MemoryStream(rmaAttachment.FileBytes);
         var rmaWorkbook = WorkbookFactory.Create(inputStream);
         try
         {
@@ -601,12 +634,13 @@ public sealed class ExcelImportJob
             rmaWorkbook.Write(outputStream, leaveOpen: true);
             var outputBytes = outputStream.ToArray();
             var uploadFileDate = processingDate.AddDays(1);
+            // The uploaded RMA file is written back to the current Feishu date row as the new latest baseline.
             _feishuClient
                 .UploadRmaAttachmentAsync(processingDate, $"{RmaSheetName}{uploadFileDate.Month}-{uploadFileDate.Day}.xlsx", outputBytes)
                 .GetAwaiter()
                 .GetResult();
 
-            messages.Add($"Appended {appendedRows} Refund payment rows to RMA sheet {targetSheet.SheetName} and uploaded it to Feishu date {processingDate:yyyy-MM-dd}.");
+            messages.Add($"Appended {appendedRows} Refund payment rows to RMA sheet {targetSheet.SheetName} from Feishu RMA attachment date {rmaAttachment.RecordDate:yyyy-MM-dd} and uploaded it to Feishu date {processingDate:yyyy-MM-dd}.");
         }
         finally
         {
@@ -621,6 +655,7 @@ public sealed class ExcelImportJob
         CellStyleCache cellStyleCache,
         ICollection<string> messages)
     {
+        // These rules are run after all raw data is imported so they can rely on refreshed mapping and source sheets.
         var waitingOrderIds = ReadWaitingOrderIds(processingDate, formatter);
         var highlightedOrderIds = HighlightWaitingFulfillmentOrders(workbook, waitingOrderIds, formatter, cellStyleCache);
 
@@ -629,6 +664,7 @@ public sealed class ExcelImportJob
         UpsertStorePersonRelationSheet(workbook, cellStyleCache);
         if (processingDate.Day == 1)
         {
+            // The daily summary blocks accumulate within a month; reset them when a new month starts.
             ClearMonthlyDailySummarySheets(workbook);
             messages.Add($"Cleared monthly daily summary data for {processingDate:yyyy-MM-dd}.");
         }
@@ -652,6 +688,7 @@ public sealed class ExcelImportJob
 
     private static void ClearMonthlyDailySummarySheets(IWorkbook workbook)
     {
+        // Month-start runs keep the workbook structure but remove prior-month accumulated daily rows.
         var summarySheet = workbook.GetSheet(SummarySheetName);
         if (summarySheet is not null)
         {
@@ -723,6 +760,7 @@ public sealed class ExcelImportJob
 
     private HashSet<string> ReadWaitingOrderIds(DateOnly processingDate, DataFormatter formatter)
     {
+        // Waiting orders are maintained as a separate operator file; matching fulfillment rows are highlighted and excluded.
         var waitingOrderPath = Path.Combine(
             _options.RootDirectory,
             processingDate.ToString("yyyy-MM-dd"),
@@ -825,6 +863,7 @@ public sealed class ExcelImportJob
         DataFormatter formatter,
         CellStyleCache cellStyleCache)
     {
+        // The fulfillment template excludes waiting/red orders and cancelled orders before formula rows are copied down.
         var sourceSheet = workbook.GetSheet(FulfillmentSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentSheetName}");
         var targetSheet = workbook.GetSheet(FulfillmentTemplateSheetName)
@@ -898,6 +937,7 @@ public sealed class ExcelImportJob
         DataFormatter formatter,
         CellStyleCache cellStyleCache)
     {
+        // The payment template is order-only; refunds are handled separately for RMA and summary refund metrics.
         var sourceSheet = workbook.GetSheet(PaymentsSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {PaymentsSheetName}");
         var targetSheet = workbook.GetSheet(PaymentTemplateSheetName)
@@ -958,6 +998,7 @@ public sealed class ExcelImportJob
 
     private static FulfillmentSummaryGenerationResult GenerateFulfillmentSummaryTemplates(IWorkbook workbook)
     {
+        // Generated summary blocks mirror the manual template layout while expanding store/person sections consistently.
         var sheet = workbook.GetSheet(FulfillmentTemplateSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentTemplateSheetName}");
 
@@ -1054,6 +1095,7 @@ public sealed class ExcelImportJob
 
     private static void UpsertStorePersonRelationSheet(IWorkbook workbook, CellStyleCache cellStyleCache)
     {
+        // This helper sheet is used by Excel formulas/pivots and documents the store -> operator ownership matrix.
         var sheet = workbook.GetSheet(StorePersonRelationSheetName)
             ?? workbook.CreateSheet(StorePersonRelationSheetName);
 
@@ -1098,6 +1140,7 @@ public sealed class ExcelImportJob
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, DailySummaryMetrics>> storeDailyMetrics,
         CellStyleCache cellStyleCache)
     {
+        // Store tabs keep two daily blocks: person metrics on the left and formula-driven store KPIs on the right.
         var appendedRows = 0;
 
         foreach (var store in FulfillmentSummaryStores)
@@ -1757,6 +1800,7 @@ public sealed class ExcelImportJob
         DataFormatter formatter,
         CellStyleCache cellStyleCache)
     {
+        // The main summary sheet receives one daily row per operator plus a second formula block with totals.
         var summarySheet = workbook.GetSheet(SummarySheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {SummarySheetName}");
         var dailyMetrics = BuildDailySummaryMetrics(workbook, formatter);
@@ -1785,6 +1829,7 @@ public sealed class ExcelImportJob
         IWorkbook workbook,
         DataFormatter formatter)
     {
+        // Person-level metrics merge fulfillment, advertising, and payment data through the SKU ownership mapping.
         var metricsByPerson = FulfillmentSummaryPeople.ToDictionary(
             person => person,
             _ => new DailySummaryMetrics(),
@@ -1804,6 +1849,7 @@ public sealed class ExcelImportJob
         IWorkbook workbook,
         DataFormatter formatter)
     {
+        // Store-level metrics use the same calculation rules but bucket rows by account before operator ownership.
         var metricsByStore = FulfillmentSummaryStores.ToDictionary(
             store => store,
             store => (IDictionary<string, DailySummaryMetrics>)ResolveStorePeople(store).ToDictionary(
@@ -1827,6 +1873,7 @@ public sealed class ExcelImportJob
 
     private static Dictionary<string, SkuMapping> ReadSkuMappings(IWorkbook workbook, DataFormatter formatter)
     {
+        // The mapping sheet ties marketplace SKU to B2B item code and operator; this is the spine of metric ownership.
         var sheet = workbook.GetSheet(MappingSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {MappingSheetName}");
         var ownerNamesByCode = ReadSkuOwnerNames(workbook, formatter);
@@ -1865,6 +1912,7 @@ public sealed class ExcelImportJob
 
     private static Dictionary<string, string> ReadSkuOwnerNames(IWorkbook workbook, DataFormatter formatter)
     {
+        // Some mapping rows use operator codes; normalize them to display names before summary aggregation.
         var sheet = workbook.GetSheet("\u0073\u006b\u0075\u5f52\u5c5e")
             ?? throw new InvalidOperationException("Sheet not found: sku\u5f52\u5c5e");
         var headerRowIndex = FindHeaderRow(sheet, formatter);
@@ -1894,6 +1942,7 @@ public sealed class ExcelImportJob
 
     private static Dictionary<string, double> ReadB2BCosts(IWorkbook workbook, DataFormatter formatter)
     {
+        // B2B item costs are read by Item Code and used as procurement cost in premium calculations.
         var sheet = FindSheet(workbook, ["B2B\uff08ol)", "B2B(ol)", "B2BOL"])
             ?? throw new InvalidOperationException("Sheet not found: B2B\uff08ol)");
         var headerRowIndex = FindHeaderRow(sheet, formatter);
@@ -1929,6 +1978,7 @@ public sealed class ExcelImportJob
         IReadOnlyDictionary<string, double> b2bCosts,
         IDictionary<string, DailySummaryMetrics> metricsByPerson)
     {
+        // Fulfillment contributes order quantity, sales, and premium, excluding waiting/red and cancelled orders.
         var sheet = workbook.GetSheet(FulfillmentSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {FulfillmentSheetName}");
         var headerRowIndex = FindHeaderRow(sheet, formatter);
@@ -1984,6 +2034,7 @@ public sealed class ExcelImportJob
         IReadOnlyDictionary<string, SkuMapping> skuMappings,
         IDictionary<string, DailySummaryMetrics> metricsByPerson)
     {
+        // Advertising spend is attributed to operators through SKU ownership.
         var sheet = workbook.GetSheet(AdvertisingSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {AdvertisingSheetName}");
         const int skuColumnIndex = 6; // Excel column G.
@@ -2025,6 +2076,7 @@ public sealed class ExcelImportJob
         IReadOnlyDictionary<string, double> b2bCosts,
         IDictionary<string, DailySummaryMetrics> metricsByPerson)
     {
+        // Payments provide the settlement view: order income, refund amount, and payment-side premium.
         var sheet = workbook.GetSheet(PaymentsSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {PaymentsSheetName}");
         var headerRowIndex = FindHeaderRow(sheet, formatter);
@@ -2287,6 +2339,7 @@ public sealed class ExcelImportJob
         string rawPersonName,
         IEnumerable<string> personNames)
     {
+        // Operator names may differ by whitespace/case or code source, so compare on a compact normalized form.
         var normalized = NormalizePersonName(rawPersonName);
         if (normalized.Length == 0)
         {
@@ -2314,12 +2367,14 @@ public sealed class ExcelImportJob
 
     private static double CalculatePremium(double salesTotal, double procurement, double fixedFee)
     {
+        // No procurement cost means the row cannot produce a trusted premium, so the metric is intentionally ignored.
         if (procurement == 0)
         {
             return 0;
         }
         else
         {
+            // Business income is discounted by the 200 threshold before subtracting procurement and source-specific fees.
             var orderIncome = salesTotal > 200D
             ? (salesTotal - 200D) * 0.9D + 200D * 0.85D
             : salesTotal * 0.85D;
@@ -2860,6 +2915,7 @@ public sealed class ExcelImportJob
 
     private static TableData ReadExcelTableWithTwoRowHeaders(IWorkbook workbook, ISheet sheet, DataFormatter formatter)
     {
+        // Some source workbooks use merged group headers; prefer the second header row where it names the real field.
         var evaluator = workbook.GetCreationHelper().CreateFormulaEvaluator();
         var headerRowIndex = FindHeaderRow(sheet, formatter);
         if (headerRowIndex < 0)
@@ -2929,6 +2985,7 @@ public sealed class ExcelImportJob
         DataFormatter formatter,
         CellStyleCache cellStyleCache)
     {
+        // Generic table copy is header-driven so source column order can change without breaking the import.
         var targetHeaderRowIndex = FindHeaderRow(targetSheet, formatter);
         if (targetHeaderRowIndex < 0)
         {
@@ -3038,6 +3095,7 @@ public sealed class ExcelImportJob
         DataFormatter formatter,
         CellStyleCache cellStyleCache)
     {
+        // Feishu mapping data is split by account; merge it into the report's single mapping sheet with an account column.
         var targetHeaderRowIndex = FindHeaderRow(targetSheet, formatter);
         if (targetHeaderRowIndex < 0)
         {
@@ -3103,6 +3161,7 @@ public sealed class ExcelImportJob
         IWorkbook workbook,
         DataFormatter formatter)
     {
+        // RMA updates are sourced only from payment rows whose type is Refund.
         var evaluator = workbook.GetCreationHelper().CreateFormulaEvaluator();
         var paymentSheet = workbook.GetSheet(PaymentsSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {PaymentsSheetName}");
@@ -3154,6 +3213,7 @@ public sealed class ExcelImportJob
         DataFormatter formatter,
         CellStyleCache cellStyleCache)
     {
+        // The RMA workbook can be newly created for a month, so ensure every mapped target column exists before append.
         var targetHeaders = RmaColumnMap.Values.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var headerRowIndex = FindHeaderRow(targetSheet, formatter);
         IRow headerRow;
@@ -3229,6 +3289,7 @@ public sealed class ExcelImportJob
 
     private static ISheet? FindSheet(IWorkbook workbook, IReadOnlyList<string> sheetNameCandidates)
     {
+        // Sheet names in templates vary by spaces and a trailing "表", so try exact names first and normalized names second.
         foreach (var sheetName in sheetNameCandidates)
         {
             var sheet = workbook.GetSheet(sheetName);

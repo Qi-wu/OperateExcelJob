@@ -18,6 +18,7 @@ internal static class DelimitedTableReader
 
     private static TableData BuildTable(IReadOnlyList<string> lines, Func<string, List<string>> parseLine)
     {
+        // Source exports may include title/blank lines before the table; the first row with two cells is treated as headers.
         var headerRowIndex = FindHeaderRow(lines, parseLine);
         if (headerRowIndex < 0)
         {
@@ -60,6 +61,7 @@ internal static class DelimitedTableReader
 
     private static List<string> ParseCsvLine(string line)
     {
+        // Keep CSV parsing local so Amazon-style exports with quoted commas do not require another dependency.
         var values = new List<string>();
         var current = new StringBuilder();
         var inQuotes = false;
@@ -96,6 +98,7 @@ internal static class DelimitedTableReader
 
     private static Encoding DetectEncoding(string path)
     {
+        // Most source files are UTF-8; preserve UTF-8 BOM when present so headers cleanly drop the marker later.
         using var stream = File.OpenRead(path);
         Span<byte> bom = stackalloc byte[3];
         var read = stream.Read(bom);

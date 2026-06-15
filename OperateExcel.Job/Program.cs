@@ -15,6 +15,7 @@ builder.Services.Configure<FileLogOptions>(builder.Configuration.GetSection("Fil
 builder.Services.Configure<FeishuOptions>(builder.Configuration.GetSection("Feishu"));
 builder.Services.PostConfigure<ExcelImportOptions>(options =>
 {
+    // Allow manual backfill or local verification without changing appsettings.json.
     foreach (var arg in args)
     {
         if (arg.StartsWith("--date=", StringComparison.OrdinalIgnoreCase))
@@ -49,6 +50,7 @@ builder.Services.AddSingleton<ExcelImportJob>();
 
 if (args.Any(arg => string.Equals(arg, "--run-once", StringComparison.OrdinalIgnoreCase)))
 {
+    // Run-once mode is used by manual backfills and smoke tests; the hosted worker is only registered for service mode.
     using var runOnceHost = builder.Build();
     await runOnceHost.Services.GetRequiredService<ExcelImportJob>().RunAsync();
     return;

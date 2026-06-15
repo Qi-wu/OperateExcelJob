@@ -31,6 +31,7 @@ public sealed class DailyExcelImportWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            // Recalculate from the current wall clock after every run so long jobs do not drift the next daily schedule.
             var nextRun = schedule.GetNextRun(DateTimeOffset.Now);
             var delay = nextRun - DateTimeOffset.Now;
             if (delay < TimeSpan.Zero)
@@ -64,6 +65,7 @@ public sealed class DailyExcelImportWorker : BackgroundService
     {
         try
         {
+            // Keep the background service alive after a business failure; the next scheduled run may still succeed.
             _logger.LogInformation("Excel import job started.");
             var result = await _job.RunAsync();
             _logger.LogInformation(
@@ -93,6 +95,7 @@ public sealed class DailyExcelImportWorker : BackgroundService
     {
         public static DailySchedule Parse(string? cron)
         {
+            // The worker intentionally supports only simple daily schedules because the job has one business run per day.
             var text = string.IsNullOrWhiteSpace(cron) ? "0 2 * * *" : cron.Trim();
             var parts = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length != 5

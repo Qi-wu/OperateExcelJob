@@ -46,6 +46,32 @@ public sealed class FeishuApiClient
         return await DownloadAttachmentAsync(_options.RmaAttachmentFieldName, processingDate, cancellationToken);
     }
 
+    public async Task<FeishuAttachmentDownloadResult> DownloadLatestRmaAttachmentAsync(
+        DateOnly latestRecordDate,
+        CancellationToken cancellationToken = default)
+    {
+        // RMA uploads are sparse: days without refunds do not produce an attachment, so find the latest usable baseline.
+        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
+        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
+        var tableId = ResolveTableId()
+            ?? throw new InvalidOperationException("Feishu table id is not configured.");
+
+        var fileToken = await GetLatestAttachmentFileTokenAsync(
+            accessToken,
+            appToken,
+            tableId,
+            _options.RmaAttachmentFieldName,
+            latestRecordDate,
+            cancellationToken);
+
+        var downloadUrl = await GetTemporaryDownloadUrlAsync(accessToken, fileToken.FileToken, cancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        var fileBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        return new FeishuAttachmentDownloadResult(fileToken.RecordDate, fileBytes);
+    }
+
     public async Task<byte[]> DownloadDailyReportAttachmentAsync(DateOnly reportDate, CancellationToken cancellationToken = default)
     {
         return await DownloadAttachmentAsync(_options.DailyReportAttachmentFieldName, reportDate, cancellationToken);
@@ -54,6 +80,7 @@ public sealed class FeishuApiClient
     internal async Task<IReadOnlyList<FeishuSpreadsheetSheetData>> ReadMappingSpreadsheetSheetsAsync(
         CancellationToken cancellationToken = default)
     {
+        // Mapping data lives in a Feishu spreadsheet split across configured sheet URLs.
         var sheetIds = ResolveMappingSpreadsheetSheetIds();
         if (sheetIds.Count == 0)
         {
@@ -136,6 +163,7 @@ public sealed class FeishuApiClient
         DateOnly processingDate,
         CancellationToken cancellationToken)
     {
+        // Strict attachment reads are used for daily/report inputs that must match the requested date exactly.
         var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
         var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
         var tableId = ResolveTableId()
@@ -194,6 +222,7 @@ public sealed class FeishuApiClient
 
         if (record is null)
         {
+            // Uploads may create a new date row when the operator has not prepared one in Feishu yet.
             await CreateRecordFieldsByDateAsync(
                 accessToken,
                 appToken,
@@ -350,6 +379,7 @@ public sealed class FeishuApiClient
         string sheetId,
         CancellationToken cancellationToken)
     {
+        // Convert Feishu's value range response into the same TableData shape used by local CSV/TXT/XLSX imports.
         using var request = CreateAuthorizedRequest(
             HttpMethod.Get,
             $"{ApiBaseUrl}/sheets/v2/spreadsheets/{Uri.EscapeDataString(spreadsheetToken)}/values/{Uri.EscapeDataString(sheetId)}",
@@ -417,6 +447,7 @@ public sealed class FeishuApiClient
         var records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, dateFilter, cancellationToken);
         if (records.Count == 0)
         {
+            // Some Feishu date fields reject ExactDate filtering; fall back to client-side local-date matching.
             records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, filter: null, cancellationToken);
             records = records
                 .Where(record => record.Fields.TryGetProperty(_options.DateFieldName, out var dateField)
@@ -437,28 +468,109 @@ public sealed class FeishuApiClient
                 processingDate);
         }
 
-        var fields = records[0].Fields;
-        if (!fields.TryGetProperty(attachmentFieldName, out var attachmentField)
-            || attachmentField.ValueKind != JsonValueKind.Array)
+        var attachment = ReadAttachmentFileToken(records[0].Fields, attachmentFieldName);
+        if (attachment.Status != AttachmentTokenStatus.Found)
         {
-            throw CreateAttachmentFailure($"Field {attachmentFieldName} has no attachment.");
+            throw CreateAttachmentFailure(attachment.Detail);
         }
 
-        if (attachmentField.GetArrayLength() != 1)
+        return attachment.FileToken!;
+    }
+
+    private async Task<FeishuAttachmentFileToken> GetLatestAttachmentFileTokenAsync(
+        string accessToken,
+        string appToken,
+        string tableId,
+        string attachmentFieldName,
+        DateOnly latestRecordDate,
+        CancellationToken cancellationToken)
+    {
+        var records = await SearchRecordsAsync(accessToken, appToken, tableId, attachmentFieldName, filter: null, cancellationToken);
+        var candidates = new List<(DateOnly RecordDate, FeishuRecord Record)>();
+        foreach (var record in records)
         {
-            throw CreateAttachmentFailure($"Field {attachmentFieldName} attachment count is {attachmentField.GetArrayLength()}.");
+            // Only dates on or before the requested cutoff can be used as the previous RMA workbook baseline.
+            if (record.Fields.TryGetProperty(_options.DateFieldName, out var dateField)
+                && TryReadLocalDate(dateField, out var recordDate)
+                && recordDate <= latestRecordDate)
+            {
+                candidates.Add((recordDate, record));
+            }
+        }
+
+        var skippedDates = new HashSet<DateOnly>();
+        foreach (var candidate in candidates.OrderByDescending(candidate => candidate.RecordDate))
+        {
+            var attachment = ReadAttachmentFileToken(candidate.Record.Fields, attachmentFieldName);
+            if (attachment.Status == AttachmentTokenStatus.Found)
+            {
+                if (candidate.RecordDate != latestRecordDate)
+                {
+                    _logger.LogInformation(
+                        "Using Feishu {AttachmentFieldName} attachment from {SourceDate:yyyy-MM-dd}; no uploaded attachment was found from {LatestRecordDate:yyyy-MM-dd} down to the next available date.",
+                        attachmentFieldName,
+                        candidate.RecordDate,
+                        latestRecordDate);
+                }
+
+                return new FeishuAttachmentFileToken(candidate.RecordDate, attachment.FileToken!);
+            }
+
+            if (attachment.Status == AttachmentTokenStatus.Invalid)
+            {
+                // Malformed attachments should still stop the run instead of silently skipping a bad Feishu row.
+                throw CreateAttachmentFailure($"{attachment.Detail} Date: {candidate.RecordDate:yyyy-MM-dd}.");
+            }
+
+            if (skippedDates.Add(candidate.RecordDate))
+            {
+                _logger.LogInformation(
+                    "Skipped Feishu {AttachmentFieldName} attachment on {RecordDate:yyyy-MM-dd}: {Detail}",
+                    attachmentFieldName,
+                    candidate.RecordDate,
+                    attachment.Detail);
+            }
+        }
+
+        throw CreateAttachmentFailure($"No usable {attachmentFieldName} attachment found on or before {latestRecordDate:yyyy-MM-dd}.");
+    }
+
+    private static AttachmentTokenReadResult ReadAttachmentFileToken(JsonElement fields, string attachmentFieldName)
+    {
+        // Distinguish a legitimately missing attachment from malformed attachment data so callers can choose retry/stop.
+        if (!fields.TryGetProperty(attachmentFieldName, out var attachmentField)
+            || attachmentField.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return AttachmentTokenReadResult.Missing($"Field {attachmentFieldName} has no attachment.");
+        }
+
+        if (attachmentField.ValueKind != JsonValueKind.Array)
+        {
+            return AttachmentTokenReadResult.Invalid($"Field {attachmentFieldName} is not an attachment array.");
+        }
+
+        var attachmentCount = attachmentField.GetArrayLength();
+        if (attachmentCount == 0)
+        {
+            return AttachmentTokenReadResult.Missing($"Field {attachmentFieldName} has no attachment.");
+        }
+
+        if (attachmentCount != 1)
+        {
+            return AttachmentTokenReadResult.Invalid($"Field {attachmentFieldName} attachment count is {attachmentCount}.");
         }
 
         var attachment = attachmentField[0];
         var fileName = TryReadString(attachment, "name") ?? TryReadString(attachment, "file_name") ?? string.Empty;
         if (!fileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
         {
-            throw CreateAttachmentFailure($"Attachment is not an .xlsx file: {fileName}");
+            return AttachmentTokenReadResult.Invalid($"Attachment is not an .xlsx file: {fileName}");
         }
 
-        return TryReadString(attachment, "file_token")
-            ?? TryReadString(attachment, "token")
-            ?? throw CreateAttachmentFailure("Attachment is missing file_token.");
+        var fileToken = TryReadString(attachment, "file_token") ?? TryReadString(attachment, "token");
+        return string.IsNullOrWhiteSpace(fileToken)
+            ? AttachmentTokenReadResult.Invalid("Attachment is missing file_token.")
+            : AttachmentTokenReadResult.Found(fileToken);
     }
 
     private async Task<FeishuRecord> GetRecordByDateAsync(
@@ -934,6 +1046,19 @@ public sealed class FeishuApiClient
     private static bool TryReadLocalDate(JsonElement value, out DateOnly date)
     {
         date = default;
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in value.EnumerateArray())
+            {
+                if (TryReadLocalDate(item, out date))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var timestamp))
         {
             date = DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeMilliseconds(timestamp).LocalDateTime);
@@ -1010,7 +1135,39 @@ public sealed class FeishuApiClient
         }
     }
 
+    private enum AttachmentTokenStatus
+    {
+        Found,
+        Missing,
+        Invalid
+    }
+
+    private sealed record AttachmentTokenReadResult(
+        AttachmentTokenStatus Status,
+        string? FileToken,
+        string Detail)
+    {
+        public static AttachmentTokenReadResult Found(string fileToken)
+        {
+            return new AttachmentTokenReadResult(AttachmentTokenStatus.Found, fileToken, string.Empty);
+        }
+
+        public static AttachmentTokenReadResult Missing(string detail)
+        {
+            return new AttachmentTokenReadResult(AttachmentTokenStatus.Missing, null, detail);
+        }
+
+        public static AttachmentTokenReadResult Invalid(string detail)
+        {
+            return new AttachmentTokenReadResult(AttachmentTokenStatus.Invalid, null, detail);
+        }
+    }
+
+    private sealed record FeishuAttachmentFileToken(DateOnly RecordDate, string FileToken);
+
     private sealed record FeishuRecord(string RecordId, JsonElement Fields);
 }
+
+public sealed record FeishuAttachmentDownloadResult(DateOnly RecordDate, byte[] FileBytes);
 
 internal sealed record FeishuSpreadsheetSheetData(string SheetId, string Title, TableData Table);

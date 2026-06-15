@@ -39,6 +39,7 @@ Fill these values in `OperateExcel.Job/appsettings.json` before running:
 ```json
 "Feishu": {
   "Enabled": true,
+  "UploadGeneratedAttachmentsEnabled": true,
   "AppId": "your-app-id",
   "AppSecret": "your-app-secret",
   "MappingSpreadsheetUrl": "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd",
@@ -50,6 +51,8 @@ Fill these values in `OperateExcel.Job/appsettings.json` before running:
   ]
 }
 ```
+
+Set `UploadGeneratedAttachmentsEnabled` to `false` to keep reading Feishu inputs while skipping uploads of the generated daily report and RMA attachment.
 
 If the Feishu attachment is missing, not `.xlsx`, or has more than one file, the job logs `附件读取失败` and stops.
 
