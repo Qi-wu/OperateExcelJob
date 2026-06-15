@@ -24,6 +24,7 @@ public sealed class ExcelImportJob
     private const string B2BOlSourceFileNameKeyword = "\u4ea7\u54c1\u4fe1\u606f\u4e0b\u8f7d_\u57fa\u7840";
     private const string AmazonOrderIdHeader = "amazon-order-id";
     private const string OrderStatusHeader = "order-status";
+    private const int RmaAttachmentLookbackDays = 31;
     private const int FulfillmentCopyStartColumnIndex = 11; // Excel column L.
     private const int FulfillmentCopyEndColumnIndex = 19; // Excel column T.
     private const int FulfillmentSummaryStartRowIndex = 1334; // Excel row 1335.
@@ -559,11 +560,8 @@ public sealed class ExcelImportJob
             return;
         }
 
-        var sourceRecordDate = processingDate.AddDays(-1);
-        var rmaBytes = _feishuClient
-            .DownloadRmaAttachmentAsync(sourceRecordDate)
-            .GetAwaiter()
-            .GetResult();
+        var latestSourceRecordDate = processingDate.AddDays(-1);
+        var (rmaBytes, _) = DownloadMostRecentRmaAttachment(latestSourceRecordDate, messages);
 
         using var inputStream = new MemoryStream(rmaBytes);
         var rmaWorkbook = WorkbookFactory.Create(inputStream);
@@ -588,6 +586,37 @@ public sealed class ExcelImportJob
         {
             rmaWorkbook.Close();
         }
+    }
+
+    private (byte[] Bytes, DateOnly SourceRecordDate) DownloadMostRecentRmaAttachment(
+        DateOnly latestSourceRecordDate,
+        ICollection<string> messages)
+    {
+        string? lastFailureMessage = null;
+        for (var daysBack = 0; daysBack < RmaAttachmentLookbackDays; daysBack++)
+        {
+            var sourceRecordDate = latestSourceRecordDate.AddDays(-daysBack);
+            var result = _feishuClient
+                .TryDownloadRmaAttachmentAsync(sourceRecordDate)
+                .GetAwaiter()
+                .GetResult();
+
+            if (result.IsSuccess)
+            {
+                if (sourceRecordDate != latestSourceRecordDate)
+                {
+                    messages.Add(
+                        $"Using Feishu RMA attachment from {sourceRecordDate:yyyy-MM-dd} because no usable attachment was found for {latestSourceRecordDate:yyyy-MM-dd}.");
+                }
+
+                return (result.Bytes, sourceRecordDate);
+            }
+
+            lastFailureMessage = result.FailureMessage;
+        }
+
+        throw new InvalidOperationException(
+            $"No usable Feishu RMA attachment found from {latestSourceRecordDate:yyyy-MM-dd} back {RmaAttachmentLookbackDays} days. Last failure: {lastFailureMessage}");
     }
 
     private void ApplyPostImportRules(

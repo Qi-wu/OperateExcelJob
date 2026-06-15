@@ -46,6 +46,25 @@ public sealed class FeishuApiClient
         return await DownloadAttachmentAsync(_options.RmaAttachmentFieldName, processingDate, cancellationToken);
     }
 
+    internal async Task<FeishuAttachmentDownloadResult> TryDownloadRmaAttachmentAsync(
+        DateOnly processingDate,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var bytes = await DownloadRmaAttachmentAsync(processingDate, cancellationToken);
+            return FeishuAttachmentDownloadResult.Success(bytes);
+        }
+        catch (InvalidOperationException exception) when (IsAttachmentReadFailure(exception))
+        {
+            _logger.LogWarning(
+                exception,
+                "No usable Feishu RMA attachment found for {ProcessingDate:yyyy-MM-dd}.",
+                processingDate);
+            return FeishuAttachmentDownloadResult.Failure(exception.Message);
+        }
+    }
+
     public async Task<byte[]> DownloadDailyReportAttachmentAsync(DateOnly reportDate, CancellationToken cancellationToken = default)
     {
         return await DownloadAttachmentAsync(_options.DailyReportAttachmentFieldName, reportDate, cancellationToken);
@@ -1002,6 +1021,11 @@ public sealed class FeishuApiClient
         return new InvalidOperationException($"{AttachmentReadFailed}: {detail}");
     }
 
+    private static bool IsAttachmentReadFailure(Exception exception)
+    {
+        return exception.Message.StartsWith($"{AttachmentReadFailed}:", StringComparison.Ordinal);
+    }
+
     private sealed class FeishuApiException : InvalidOperationException
     {
         public FeishuApiException(string message)
@@ -1014,3 +1038,16 @@ public sealed class FeishuApiClient
 }
 
 internal sealed record FeishuSpreadsheetSheetData(string SheetId, string Title, TableData Table);
+
+internal sealed record FeishuAttachmentDownloadResult(bool IsSuccess, byte[] Bytes, string? FailureMessage)
+{
+    public static FeishuAttachmentDownloadResult Success(byte[] bytes)
+    {
+        return new FeishuAttachmentDownloadResult(true, bytes, null);
+    }
+
+    public static FeishuAttachmentDownloadResult Failure(string failureMessage)
+    {
+        return new FeishuAttachmentDownloadResult(false, [], failureMessage);
+    }
+}
