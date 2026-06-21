@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -12,11 +13,15 @@ public sealed class FeishuApiClient
     private const string ApiBaseUrl = "https://open.feishu.cn/open-apis";
     private const string AttachmentReadFailed = "\u9644\u4ef6\u8bfb\u53d6\u5931\u8d25";
     private static readonly TimeSpan ResponseBodyReadTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan TenantAccessTokenDefaultLifetime = TimeSpan.FromHours(1);
+    private static readonly TimeSpan TenantAccessTokenRefreshSkew = TimeSpan.FromMinutes(5);
 
     private readonly HttpClient _httpClient;
     private readonly FeishuOptions _options;
     private readonly ILogger<FeishuApiClient> _logger;
+    private readonly SemaphoreSlim _tenantAccessTokenLock = new(1, 1);
     private string? _tenantAccessToken;
+    private DateTimeOffset _tenantAccessTokenRefreshAt = DateTimeOffset.MinValue;
 
     public FeishuApiClient(HttpClient httpClient, IOptions<FeishuOptions> options, ILogger<FeishuApiClient> logger)
     {
@@ -51,25 +56,30 @@ public sealed class FeishuApiClient
         CancellationToken cancellationToken = default)
     {
         // RMA uploads are sparse: days without refunds do not produce an attachment, so find the latest usable baseline.
-        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
-        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
-        var tableId = ResolveTableId()
-            ?? throw new InvalidOperationException("Feishu table id is not configured.");
+        return await ExecuteWithTenantAccessTokenRetryAsync(
+            async (accessToken, retryCancellationToken) =>
+            {
+                var appToken = await ResolveBitableAppTokenAsync(accessToken, retryCancellationToken);
+                var tableId = ResolveTableId()
+                    ?? throw new InvalidOperationException("Feishu table id is not configured.");
 
-        var fileToken = await GetLatestAttachmentFileTokenAsync(
-            accessToken,
-            appToken,
-            tableId,
-            _options.RmaAttachmentFieldName,
-            latestRecordDate,
+                var fileToken = await GetLatestAttachmentFileTokenAsync(
+                    accessToken,
+                    appToken,
+                    tableId,
+                    _options.RmaAttachmentFieldName,
+                    latestRecordDate,
+                    retryCancellationToken);
+
+                var downloadUrl = await GetTemporaryDownloadUrlAsync(accessToken, fileToken.FileToken, retryCancellationToken);
+                using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
+                using var response = await _httpClient.SendAsync(request, retryCancellationToken);
+                response.EnsureSuccessStatusCode();
+                var fileBytes = await response.Content.ReadAsByteArrayAsync(retryCancellationToken);
+                return new FeishuAttachmentDownloadResult(fileToken.RecordDate, fileBytes);
+            },
+            "download latest Feishu RMA attachment",
             cancellationToken);
-
-        var downloadUrl = await GetTemporaryDownloadUrlAsync(accessToken, fileToken.FileToken, cancellationToken);
-        using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
-        var fileBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        return new FeishuAttachmentDownloadResult(fileToken.RecordDate, fileBytes);
     }
 
     public async Task<byte[]> DownloadDailyReportAttachmentAsync(DateOnly reportDate, CancellationToken cancellationToken = default)
@@ -87,30 +97,35 @@ public sealed class FeishuApiClient
             throw new InvalidOperationException("Feishu mapping spreadsheet sheet URLs are not configured.");
         }
 
-        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
-        var spreadsheetToken = await ResolveSpreadsheetTokenAsync(
-            _options.MappingSpreadsheetUrl,
-            accessToken,
+        return await ExecuteWithTenantAccessTokenRetryAsync(
+            async (accessToken, retryCancellationToken) =>
+            {
+                var spreadsheetToken = await ResolveSpreadsheetTokenAsync(
+                    _options.MappingSpreadsheetUrl,
+                    accessToken,
+                    retryCancellationToken);
+                var sheetTitles = await GetSpreadsheetSheetTitlesAsync(
+                    accessToken,
+                    spreadsheetToken,
+                    retryCancellationToken);
+
+                var sheets = new List<FeishuSpreadsheetSheetData>();
+                foreach (var sheetId in sheetIds)
+                {
+                    var title = sheetTitles.TryGetValue(sheetId, out var sheetTitle) ? sheetTitle : sheetId;
+                    var table = await ReadSpreadsheetSheetValuesAsync(
+                        accessToken,
+                        spreadsheetToken,
+                        sheetId,
+                        retryCancellationToken);
+
+                    sheets.Add(new FeishuSpreadsheetSheetData(sheetId, title, table));
+                }
+
+                return sheets;
+            },
+            "read Feishu mapping spreadsheet sheets",
             cancellationToken);
-        var sheetTitles = await GetSpreadsheetSheetTitlesAsync(
-            accessToken,
-            spreadsheetToken,
-            cancellationToken);
-
-        var sheets = new List<FeishuSpreadsheetSheetData>();
-        foreach (var sheetId in sheetIds)
-        {
-            var title = sheetTitles.TryGetValue(sheetId, out var sheetTitle) ? sheetTitle : sheetId;
-            var table = await ReadSpreadsheetSheetValuesAsync(
-                accessToken,
-                spreadsheetToken,
-                sheetId,
-                cancellationToken);
-
-            sheets.Add(new FeishuSpreadsheetSheetData(sheetId, title, table));
-        }
-
-        return sheets;
     }
 
     public async Task UploadDailyReportAttachmentAndMarkCompletedAsync(
@@ -164,24 +179,29 @@ public sealed class FeishuApiClient
         CancellationToken cancellationToken)
     {
         // Strict attachment reads are used for daily/report inputs that must match the requested date exactly.
-        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
-        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
-        var tableId = ResolveTableId()
-            ?? throw new InvalidOperationException("Feishu table id is not configured.");
+        return await ExecuteWithTenantAccessTokenRetryAsync(
+            async (accessToken, retryCancellationToken) =>
+            {
+                var appToken = await ResolveBitableAppTokenAsync(accessToken, retryCancellationToken);
+                var tableId = ResolveTableId()
+                    ?? throw new InvalidOperationException("Feishu table id is not configured.");
 
-        var fileToken = await GetAttachmentFileTokenAsync(
-            accessToken,
-            appToken,
-            tableId,
-            attachmentFieldName,
-            processingDate,
+                var fileToken = await GetAttachmentFileTokenAsync(
+                    accessToken,
+                    appToken,
+                    tableId,
+                    attachmentFieldName,
+                    processingDate,
+                    retryCancellationToken);
+
+                var downloadUrl = await GetTemporaryDownloadUrlAsync(accessToken, fileToken, retryCancellationToken);
+                using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
+                using var response = await _httpClient.SendAsync(request, retryCancellationToken);
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsByteArrayAsync(retryCancellationToken);
+            },
+            $"download Feishu attachment field '{attachmentFieldName}'",
             cancellationToken);
-
-        var downloadUrl = await GetTemporaryDownloadUrlAsync(accessToken, fileToken, cancellationToken);
-        using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsByteArrayAsync(cancellationToken);
     }
 
     private async Task<object> BuildUploadedAttachmentFieldValueAsync(
@@ -189,16 +209,21 @@ public sealed class FeishuApiClient
         byte[] fileBytes,
         CancellationToken cancellationToken)
     {
-        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
-        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
-        var uploadedFileToken = await UploadBitableAttachmentAsync(
-            accessToken,
-            appToken,
-            fileName,
-            fileBytes,
-            cancellationToken);
+        return await ExecuteWithTenantAccessTokenRetryAsync(
+            async (accessToken, retryCancellationToken) =>
+            {
+                var appToken = await ResolveBitableAppTokenAsync(accessToken, retryCancellationToken);
+                var uploadedFileToken = await UploadBitableAttachmentAsync(
+                    accessToken,
+                    appToken,
+                    fileName,
+                    fileBytes,
+                    retryCancellationToken);
 
-        return new[] { new { file_token = uploadedFileToken } };
+                return new[] { new { file_token = uploadedFileToken } };
+            },
+            "upload Feishu bitable attachment",
+            cancellationToken);
     }
 
     private async Task UpdateRecordFieldsByDateAsync(
@@ -208,42 +233,47 @@ public sealed class FeishuApiClient
         string errorMessage,
         CancellationToken cancellationToken)
     {
-        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
-        var appToken = await ResolveBitableAppTokenAsync(accessToken, cancellationToken);
-        var tableId = ResolveTableId()
-            ?? throw new InvalidOperationException("Feishu table id is not configured.");
-        var record = await FindRecordByDateAsync(
-            accessToken,
-            appToken,
-            tableId,
-            lookupFieldName,
-            recordDate,
+        await ExecuteWithTenantAccessTokenRetryAsync(
+            async (accessToken, retryCancellationToken) =>
+            {
+                var appToken = await ResolveBitableAppTokenAsync(accessToken, retryCancellationToken);
+                var tableId = ResolveTableId()
+                    ?? throw new InvalidOperationException("Feishu table id is not configured.");
+                var record = await FindRecordByDateAsync(
+                    accessToken,
+                    appToken,
+                    tableId,
+                    lookupFieldName,
+                    recordDate,
+                    retryCancellationToken);
+
+                if (record is null)
+                {
+                    // Uploads may create a new date row when the operator has not prepared one in Feishu yet.
+                    await CreateRecordFieldsByDateAsync(
+                        accessToken,
+                        appToken,
+                        tableId,
+                        recordDate,
+                        fields,
+                        errorMessage,
+                        retryCancellationToken);
+                    return;
+                }
+
+                using var request = CreateAuthorizedJsonRequest(
+                    HttpMethod.Put,
+                    $"{ApiBaseUrl}/bitable/v1/apps/{Uri.EscapeDataString(appToken)}/tables/{Uri.EscapeDataString(tableId)}/records/{Uri.EscapeDataString(record.RecordId)}",
+                    accessToken,
+                    new { fields });
+
+                using var response = await _httpClient.SendAsync(request, retryCancellationToken);
+                var body = await ReadResponseBodyAsync(response, errorMessage, retryCancellationToken);
+                EnsureSuccessJson(response, body, errorMessage);
+                _logger.LogInformation("Updated Feishu record {RecordId} for {RecordDate:yyyy-MM-dd}.", record.RecordId, recordDate);
+            },
+            errorMessage,
             cancellationToken);
-
-        if (record is null)
-        {
-            // Uploads may create a new date row when the operator has not prepared one in Feishu yet.
-            await CreateRecordFieldsByDateAsync(
-                accessToken,
-                appToken,
-                tableId,
-                recordDate,
-                fields,
-                errorMessage,
-                cancellationToken);
-            return;
-        }
-
-        var request = CreateAuthorizedJsonRequest(
-            HttpMethod.Put,
-            $"{ApiBaseUrl}/bitable/v1/apps/{Uri.EscapeDataString(appToken)}/tables/{Uri.EscapeDataString(tableId)}/records/{Uri.EscapeDataString(record.RecordId)}",
-            accessToken,
-            new { fields });
-
-        var response = await _httpClient.SendAsync(request, cancellationToken);
-        var body = await ReadResponseBodyAsync(response, errorMessage, cancellationToken);
-        EnsureSuccessJson(response, body, errorMessage);
-        _logger.LogInformation("Updated Feishu record {RecordId} for {RecordDate:yyyy-MM-dd}.", record.RecordId, recordDate);
     }
 
     private async Task CreateRecordFieldsByDateAsync(
@@ -260,36 +290,144 @@ public sealed class FeishuApiClient
             [_options.DateFieldName] = GetLocalDateStartUnixMilliseconds(recordDate)
         };
 
-        var request = CreateAuthorizedJsonPost(
+        using var request = CreateAuthorizedJsonPost(
             $"{ApiBaseUrl}/bitable/v1/apps/{Uri.EscapeDataString(appToken)}/tables/{Uri.EscapeDataString(tableId)}/records",
             accessToken,
             new { fields = createFields });
 
-        var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
         var body = await ReadResponseBodyAsync(response, errorMessage, cancellationToken);
         EnsureSuccessJson(response, body, errorMessage);
         _logger.LogInformation("Created Feishu record for {RecordDate:yyyy-MM-dd}.", recordDate);
     }
 
-    private async Task<string> GetTenantAccessTokenAsync(CancellationToken cancellationToken)
+    private async Task<string> GetTenantAccessTokenAsync(CancellationToken cancellationToken, bool forceRefresh = false)
     {
-        if (_tenantAccessToken is not null)
+        var now = DateTimeOffset.UtcNow;
+        if (!forceRefresh && HasUsableTenantAccessToken(now))
         {
-            return _tenantAccessToken;
+            return _tenantAccessToken!;
         }
 
-        using var request = CreateJsonPost(
-            $"{ApiBaseUrl}/auth/v3/tenant_access_token/internal",
-            new
+        await _tenantAccessTokenLock.WaitAsync(cancellationToken);
+        try
+        {
+            now = DateTimeOffset.UtcNow;
+            if (!forceRefresh && HasUsableTenantAccessToken(now))
             {
-                app_id = _options.AppId,
-                app_secret = _options.AppSecret
-            });
+                return _tenantAccessToken!;
+            }
 
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        using var json = await ReadSuccessJsonAsync(response, "Get tenant_access_token failed", cancellationToken);
-        _tenantAccessToken = ReadRequiredString(json.RootElement, "tenant_access_token", "tenant_access_token");
-        return _tenantAccessToken;
+            using var request = CreateJsonPost(
+                $"{ApiBaseUrl}/auth/v3/tenant_access_token/internal",
+                new
+                {
+                    app_id = _options.AppId,
+                    app_secret = _options.AppSecret
+                });
+
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            using var json = await ReadSuccessJsonAsync(response, "Get tenant_access_token failed", cancellationToken);
+            var accessToken = ReadRequiredString(json.RootElement, "tenant_access_token", "tenant_access_token");
+            var expiresIn = TryReadInt32(json.RootElement, "expire", out var expireSeconds) && expireSeconds > 0
+                ? TimeSpan.FromSeconds(expireSeconds)
+                : TenantAccessTokenDefaultLifetime;
+
+            _tenantAccessToken = accessToken;
+            _tenantAccessTokenRefreshAt = DateTimeOffset.UtcNow.Add(CalculateTenantAccessTokenRefreshAfter(expiresIn));
+            return _tenantAccessToken;
+        }
+        finally
+        {
+            _tenantAccessTokenLock.Release();
+        }
+    }
+
+    private bool HasUsableTenantAccessToken(DateTimeOffset now)
+    {
+        return !string.IsNullOrWhiteSpace(_tenantAccessToken)
+            && now < _tenantAccessTokenRefreshAt;
+    }
+
+    private static TimeSpan CalculateTenantAccessTokenRefreshAfter(TimeSpan expiresIn)
+    {
+        if (expiresIn <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        if (expiresIn > TenantAccessTokenRefreshSkew)
+        {
+            return expiresIn - TenantAccessTokenRefreshSkew;
+        }
+
+        return TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(1).Ticks, expiresIn.Ticks / 2));
+    }
+
+    private async Task<T> ExecuteWithTenantAccessTokenRetryAsync<T>(
+        Func<string, CancellationToken, Task<T>> operation,
+        string operationName,
+        CancellationToken cancellationToken)
+    {
+        var accessToken = await GetTenantAccessTokenAsync(cancellationToken);
+        try
+        {
+            return await operation(accessToken, cancellationToken);
+        }
+        catch (FeishuApiException exception) when (IsTenantAccessTokenFailure(exception))
+        {
+            _logger.LogWarning(
+                exception,
+                "Feishu tenant_access_token was rejected during {OperationName}. Refreshing token and retrying once.",
+                operationName);
+
+            await InvalidateTenantAccessTokenAsync(accessToken, cancellationToken);
+            var refreshedAccessToken = await GetTenantAccessTokenAsync(cancellationToken, forceRefresh: true);
+            return await operation(refreshedAccessToken, cancellationToken);
+        }
+    }
+
+    private async Task ExecuteWithTenantAccessTokenRetryAsync(
+        Func<string, CancellationToken, Task> operation,
+        string operationName,
+        CancellationToken cancellationToken)
+    {
+        await ExecuteWithTenantAccessTokenRetryAsync(
+            async (accessToken, retryCancellationToken) =>
+            {
+                await operation(accessToken, retryCancellationToken);
+                return true;
+            },
+            operationName,
+            cancellationToken);
+    }
+
+    private async Task InvalidateTenantAccessTokenAsync(string accessToken, CancellationToken cancellationToken)
+    {
+        await _tenantAccessTokenLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (string.Equals(_tenantAccessToken, accessToken, StringComparison.Ordinal))
+            {
+                _tenantAccessToken = null;
+                _tenantAccessTokenRefreshAt = DateTimeOffset.MinValue;
+            }
+        }
+        finally
+        {
+            _tenantAccessTokenLock.Release();
+        }
+    }
+
+    private static bool IsTenantAccessTokenFailure(FeishuApiException exception)
+    {
+        if (exception.Code == 99991663 || exception.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            return true;
+        }
+
+        return exception.Message.Contains("Invalid access token", StringComparison.OrdinalIgnoreCase)
+            || exception.Message.Contains("token attached", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<string> ResolveBitableAppTokenAsync(string accessToken, CancellationToken cancellationToken)
@@ -843,7 +981,7 @@ public sealed class FeishuApiClient
         var body = await ReadResponseBodyAsync(response, action, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            throw new FeishuApiException($"{action}: HTTP {(int)response.StatusCode}, {body}");
+            throw CreateHttpFailureException(response.StatusCode, body, action);
         }
 
         var json = JsonDocument.Parse(body);
@@ -855,7 +993,7 @@ public sealed class FeishuApiClient
     {
         if (!response.IsSuccessStatusCode)
         {
-            throw new FeishuApiException($"{action}: HTTP {(int)response.StatusCode}, {body}");
+            throw CreateHttpFailureException(response.StatusCode, body, action);
         }
 
         using var json = JsonDocument.Parse(body);
@@ -883,15 +1021,43 @@ public sealed class FeishuApiClient
 
     private static void EnsureSuccessJson(JsonDocument json, string action, string body)
     {
-        if (json.RootElement.TryGetProperty("code", out var code) && code.GetInt32() != 0)
+        if (TryReadInt32(json.RootElement, "code", out var code) && code != 0)
         {
             var message = TryReadString(json.RootElement, "msg") ?? TryReadString(json.RootElement, "message") ?? body;
-            if (code.GetInt32() == 1061004 && action.Contains("Upload Feishu", StringComparison.OrdinalIgnoreCase))
+            if (code == 1061004 && action.Contains("Upload Feishu", StringComparison.OrdinalIgnoreCase))
             {
                 message = $"{message} Ensure the Feishu app has media upload permission and edit permission on the target bitable/wiki node.";
             }
 
-            throw new FeishuApiException($"{action}: {message}");
+            throw new FeishuApiException($"{action}: {message}", code);
+        }
+    }
+
+    private static FeishuApiException CreateHttpFailureException(HttpStatusCode statusCode, string body, string action)
+    {
+        _ = TryReadFeishuError(body, out var code, out _);
+        return new FeishuApiException($"{action}: HTTP {(int)statusCode}, {body}", code, statusCode);
+    }
+
+    private static bool TryReadFeishuError(string body, out int? code, out string? message)
+    {
+        code = null;
+        message = null;
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            if (TryReadInt32(json.RootElement, "code", out var parsedCode))
+            {
+                code = parsedCode;
+            }
+
+            message = TryReadString(json.RootElement, "msg")
+                ?? TryReadString(json.RootElement, "message");
+            return code.HasValue || !string.IsNullOrWhiteSpace(message);
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 
@@ -1098,6 +1264,23 @@ public sealed class FeishuApiClient
             : null;
     }
 
+    private static bool TryReadInt32(JsonElement element, string propertyName, out int value)
+    {
+        value = default;
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            return false;
+        }
+
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out value))
+        {
+            return true;
+        }
+
+        return property.ValueKind == JsonValueKind.String
+            && int.TryParse(property.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+    }
+
     private static string ConvertSpreadsheetCellValue(JsonElement cell)
     {
         return cell.ValueKind switch
@@ -1129,10 +1312,16 @@ public sealed class FeishuApiClient
 
     private sealed class FeishuApiException : InvalidOperationException
     {
-        public FeishuApiException(string message)
+        public FeishuApiException(string message, int? code = null, HttpStatusCode? statusCode = null)
             : base(message)
         {
+            Code = code;
+            StatusCode = statusCode;
         }
+
+        public int? Code { get; }
+
+        public HttpStatusCode? StatusCode { get; }
     }
 
     private enum AttachmentTokenStatus
