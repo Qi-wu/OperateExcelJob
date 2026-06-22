@@ -5,6 +5,7 @@ public sealed class ExcelImportOptions
     public string RootDirectory { get; set; } = @"D:\code\OperateExcelTemp";
     public string TemplateFilePath { get; set; } = @"D:\code\OperateExcelTemp\Temp.xlsx";
     public string OutputDirectory { get; set; } = @"D:\code\OperateExcel";
+    public string SkuOwnerMappingFilePath { get; set; } = "sku-owner-mappings.json";
     public int DateOffsetDays { get; set; } = -1;
     public string? ProcessingDateOverride { get; set; }
     public string DailyCron { get; set; } = "0 2 * * *";

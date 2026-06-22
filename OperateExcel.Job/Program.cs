@@ -29,6 +29,10 @@ builder.Services.PostConfigure<ExcelImportOptions>(options =>
         {
             options.OutputDirectory = arg["--output-dir=".Length..];
         }
+        else if (arg.StartsWith("--sku-owner-mapping=", StringComparison.OrdinalIgnoreCase))
+        {
+            options.SkuOwnerMappingFilePath = arg["--sku-owner-mapping=".Length..];
+        }
     }
 });
 

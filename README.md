@@ -34,6 +34,31 @@ Before importing `fulfillment`, `payments`, and `广告`, the job reads the `产
 
 The `映射表` sheet is filled from the configured Feishu spreadsheet sheets instead of the bitable `映射表` attachment. The importer reads the four sheet URLs in `MappingSpreadsheetSheetUrls`, matches each sheet by its title using the original mapping-sheet name rules, copies `平台SKU`, `Asin`, `B2B Item Code`, and `运营`, then fills the target `账号` column with the original account values.
 
+## SKU owner mappings
+
+The `sku归属` sheet is refreshed from `OperateExcel.Job/sku-owner-mappings.json` on every run. It is no longer inherited from the previous day's daily report attachment.
+
+Maintain the mapping file like this:
+
+```json
+{
+  "mappings": [
+    {
+      "运营": "付江爽",
+      "姓名": "付江爽"
+    }
+  ]
+}
+```
+
+`运营` must match the `运营` value imported into the `映射表` sheet. `姓名` must match the people used by the daily summary, such as `付江爽`, `龙杨`, `DD`, or `李慧`.
+
+The mapping file path is controlled by `ExcelImport:SkuOwnerMappingFilePath` in `OperateExcel.Job/appsettings.json`. You can also override it for a manual run:
+
+```powershell
+dotnet run --project OperateExcel.Job\OperateExcel.Job.csproj -- --run-once --sku-owner-mapping=D:\path\sku-owner-mappings.json
+```
+
 Fill these values in `OperateExcel.Job/appsettings.json` before running:
 
 ```json

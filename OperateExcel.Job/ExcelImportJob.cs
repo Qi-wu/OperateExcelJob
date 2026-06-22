@@ -4,6 +4,8 @@ using NPOI.SS.UserModel;
 using NPOI.XSSF.UserModel;
 using System.Globalization;
 using System.IO.Compression;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
@@ -15,6 +17,7 @@ public sealed class ExcelImportJob
     private const string FulfillmentSheetName = "fulfillment";
     private const string PaymentsSheetName = "payments";
     private const string MappingSheetName = "\u6620\u5c04\u8868";
+    private const string SkuOwnerSheetName = "sku\u5f52\u5c5e";
     private const string RmaSheetName = "RMA\u7533\u8bf7\u8868";
     private const string FulfillmentTemplateSheetName = "\u6a21\u7248F";
     private const string PaymentTemplateSheetName = "\u6a21\u677fP";
@@ -291,6 +294,7 @@ public sealed class ExcelImportJob
 
         ImportB2BOlFromLocalFile(workbook, sourceDirectory, formatter, cellStyleCache, messages);
         ImportMappingFromFeishu(workbook, processingDate, formatter, cellStyleCache, messages);
+        SyncSkuOwnerSheetFromJson(workbook, cellStyleCache, messages);
 
         var importedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
@@ -532,6 +536,118 @@ public sealed class ExcelImportJob
 
         var importedRows = CopyMappingSpreadsheetSheetsToTarget(sourceSheets, targetSheet, formatter, cellStyleCache);
         messages.Add($"Imported {importedRows} rows from Feishu mapping spreadsheet to sheet {targetSheet.SheetName}.");
+    }
+
+    private void SyncSkuOwnerSheetFromJson(
+        IWorkbook workbook,
+        CellStyleCache cellStyleCache,
+        ICollection<string> messages)
+    {
+        var mappingFilePath = ResolveSkuOwnerMappingFilePath();
+        var mappings = ReadSkuOwnerMappingEntries(mappingFilePath);
+        var sheet = FindSheet(workbook, SkuOwnerSheetName) ?? workbook.CreateSheet(SkuOwnerSheetName);
+
+        ClearDataRows(sheet, 0, sheet.LastRowNum, preserveFormulas: false);
+
+        var headerRow = sheet.GetRow(0) ?? sheet.CreateRow(0);
+        SetCellValue(headerRow.CreateCell(0), "\u8fd0\u8425", cellStyleCache);
+        SetCellValue(headerRow.CreateCell(1), "\u59d3\u540d", cellStyleCache);
+
+        for (var i = 0; i < mappings.Count; i++)
+        {
+            var row = sheet.GetRow(i + 1) ?? sheet.CreateRow(i + 1);
+            SetCellValue(row.CreateCell(0), mappings[i].OwnerCode, cellStyleCache);
+            SetCellValue(row.CreateCell(1), mappings[i].OwnerName, cellStyleCache);
+        }
+
+        sheet.SetColumnWidth(0, 18 * 256);
+        sheet.SetColumnWidth(1, 18 * 256);
+        messages.Add($"Synced {mappings.Count} SKU owner mappings from {mappingFilePath} to sheet {SkuOwnerSheetName}.");
+    }
+
+    private string ResolveSkuOwnerMappingFilePath()
+    {
+        var configuredPath = _options.SkuOwnerMappingFilePath?.Trim();
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            throw new InvalidOperationException("ExcelImport:SkuOwnerMappingFilePath is not configured.");
+        }
+
+        if (Path.IsPathRooted(configuredPath))
+        {
+            return configuredPath;
+        }
+
+        var appBasePath = Path.Combine(AppContext.BaseDirectory, configuredPath);
+        if (File.Exists(appBasePath))
+        {
+            return appBasePath;
+        }
+
+        var currentDirectoryPath = Path.GetFullPath(configuredPath);
+        return File.Exists(currentDirectoryPath)
+            ? currentDirectoryPath
+            : appBasePath;
+    }
+
+    private static IReadOnlyList<SkuOwnerMappingEntry> ReadSkuOwnerMappingEntries(string mappingFilePath)
+    {
+        if (!File.Exists(mappingFilePath))
+        {
+            throw new FileNotFoundException("SKU owner mapping file not found.", mappingFilePath);
+        }
+
+        SkuOwnerMappingFile? mappingFile;
+        var options = new JsonSerializerOptions
+        {
+            AllowTrailingCommas = true,
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip
+        };
+
+        try
+        {
+            using var stream = File.OpenRead(mappingFilePath);
+            mappingFile = JsonSerializer.Deserialize<SkuOwnerMappingFile>(stream, options);
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException($"Invalid SKU owner mapping JSON file: {mappingFilePath}", exception);
+        }
+
+        if (mappingFile?.Mappings is null || mappingFile.Mappings.Count == 0)
+        {
+            throw new InvalidOperationException($"No SKU owner mappings found in file: {mappingFilePath}");
+        }
+
+        var entries = new List<SkuOwnerMappingEntry>();
+        var ownerCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < mappingFile.Mappings.Count; i++)
+        {
+            var rowNumber = i + 1;
+            var ownerCode = mappingFile.Mappings[i].OwnerCode?.Trim() ?? string.Empty;
+            var ownerName = mappingFile.Mappings[i].OwnerName?.Trim() ?? string.Empty;
+            var normalizedOwnerCode = NormalizePersonName(ownerCode);
+
+            if (normalizedOwnerCode.Length == 0)
+            {
+                throw new InvalidOperationException($"SKU owner mapping row {rowNumber} has an empty '\u8fd0\u8425' value.");
+            }
+
+            if (ownerName.Length == 0)
+            {
+                throw new InvalidOperationException($"SKU owner mapping row {rowNumber} has an empty '\u59d3\u540d' value.");
+            }
+
+            if (!ownerCodes.Add(normalizedOwnerCode))
+            {
+                throw new InvalidOperationException($"SKU owner mapping row {rowNumber} has duplicate '\u8fd0\u8425' value: {ownerCode}");
+            }
+
+            entries.Add(new SkuOwnerMappingEntry(ownerCode, ownerName));
+        }
+
+        return entries;
     }
 
     private void UpdateRmaApplicationFromRefundPayments(
@@ -1870,8 +1986,8 @@ public sealed class ExcelImportJob
 
     private static Dictionary<string, string> ReadSkuOwnerNames(IWorkbook workbook, DataFormatter formatter)
     {
-        var sheet = workbook.GetSheet("\u0073\u006b\u0075\u5f52\u5c5e")
-            ?? throw new InvalidOperationException("Sheet not found: sku\u5f52\u5c5e");
+        var sheet = FindSheet(workbook, SkuOwnerSheetName)
+            ?? throw new InvalidOperationException($"Sheet not found: {SkuOwnerSheetName}");
         var headerRowIndex = FindHeaderRow(sheet, formatter);
         var headerIndex = ReadHeaderIndex(sheet, headerRowIndex, formatter);
         var ownerCodeColumnIndex = ResolveRequiredColumn(headerIndex, "\u8fd0\u8425", sheet.SheetName);
@@ -3888,6 +4004,23 @@ public sealed class ExcelImportJob
     private readonly record struct ParsedNumericCell(double Value, string? FormatKey);
 
     private sealed record MappingSourceSheet(string AccountName, IReadOnlyList<string> SheetNameCandidates);
+
+    private sealed class SkuOwnerMappingFile
+    {
+        [JsonPropertyName("mappings")]
+        public List<SkuOwnerMappingJsonEntry> Mappings { get; set; } = [];
+    }
+
+    private sealed class SkuOwnerMappingJsonEntry
+    {
+        [JsonPropertyName("\u8fd0\u8425")]
+        public string? OwnerCode { get; set; }
+
+        [JsonPropertyName("\u59d3\u540d")]
+        public string? OwnerName { get; set; }
+    }
+
+    private readonly record struct SkuOwnerMappingEntry(string OwnerCode, string OwnerName);
 
     private readonly record struct CopyColumn(int SourceColumnIndex, int TargetColumnIndex, string Header);
 
