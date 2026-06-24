@@ -38,6 +38,8 @@ The `映射表` sheet is filled from the configured Feishu spreadsheet sheets in
 
 The `sku归属` sheet is refreshed from `OperateExcel.Job/sku-owner-mappings.json` on every run. It is no longer inherited from the previous day's daily report attachment.
 
+Daily summary people, store-person relationships, and per-person monthly budgets are also read from this file. Do not hard-code person profile data in the program.
+
 Maintain the mapping file like this:
 
 ```json
@@ -45,13 +47,17 @@ Maintain the mapping file like this:
   "mappings": [
     {
       "运营": "付江爽",
-      "姓名": "付江爽"
+      "姓名": "付江爽",
+      "店铺": ["DU", "MING", "Adolix"],
+      "月预算": 0
     }
   ]
 }
 ```
 
-`运营` must match the `运营` value imported into the `映射表` sheet. `姓名` must match the people used by the daily summary, such as `付江爽`, `龙杨`, `DD`, or `李慧`.
+`运营` must match the `运营` value imported into the `映射表` sheet. `姓名` is the person shown in the daily summaries. The order of first appearance of distinct `姓名` values controls the daily-summary person order. Multiple `运营` values may point to the same `姓名`.
+
+`店铺` controls which store summary sheets include that person. It can be a JSON array or a comma-separated string. If omitted or empty, the person is included in all configured daily-report stores. `月预算` is optional and defaults to `0`.
 
 The mapping file path is controlled by `ExcelImport:SkuOwnerMappingFilePath` in `OperateExcel.Job/appsettings.json`. You can also override it for a manual run:
 
@@ -59,11 +65,14 @@ The mapping file path is controlled by `ExcelImport:SkuOwnerMappingFilePath` in 
 dotnet run --project OperateExcel.Job\OperateExcel.Job.csproj -- --run-once --sku-owner-mapping=D:\path\sku-owner-mappings.json
 ```
 
+The job logs the resolved `sku-owner-mappings.json` path when it syncs the `sku归属` sheet. If a published service should use a specific mapping file, configure `ExcelImport:SkuOwnerMappingFilePath` as an absolute path.
+
 Fill these values in `OperateExcel.Job/appsettings.json` before running:
 
 ```json
 "Feishu": {
   "Enabled": true,
+  "UploadGeneratedAttachments": true,
   "AppId": "your-app-id",
   "AppSecret": "your-app-secret",
   "MappingSpreadsheetUrl": "https://bcnt3e3uyrxk.feishu.cn/wiki/NYS8wnqv1i2oKwkRXADc0IQ7nrd",
@@ -75,6 +84,8 @@ Fill these values in `OperateExcel.Job/appsettings.json` before running:
   ]
 }
 ```
+
+`Enabled` controls whether Feishu is used for template download, mapping import, RMA download/update, and final upload. `UploadGeneratedAttachments` only controls whether the generated daily report and updated RMA attachment are uploaded back to Feishu. Set `UploadGeneratedAttachments` to `false` when you want to read from Feishu and generate local files without writing attachments back.
 
 If the Feishu attachment is missing, not `.xlsx`, or has more than one file, the job logs `附件读取失败` and stops.
 
