@@ -3015,6 +3015,7 @@ public sealed class ExcelImportJob
                         ? sourceRow[column.SourceColumnIndex]
                         : string.Empty;
 
+                    value = CleanMappingImportValue(column.Header, value);
                     SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
                 }
 
@@ -3658,6 +3659,17 @@ public sealed class ExcelImportJob
         }
 
         cell.SetCellValue(value);
+    }
+
+    private static string CleanMappingImportValue(string header, string value)
+    {
+        return IsTrimmedMappingImportHeader(header) ? value.Trim() : value;
+    }
+
+    private static bool IsTrimmedMappingImportHeader(string header)
+    {
+        return string.Equals(header, "\u5e73\u53f0SKU", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(header, "B2B Item Code", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryParseDateCell(string value, out DateTime dateValue)
