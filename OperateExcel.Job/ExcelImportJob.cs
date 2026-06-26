@@ -343,6 +343,10 @@ public sealed class ExcelImportJob
                 .Select(DelimitedTableReader.CleanHeader)
                 .ToList();
             var accountColumnIndex = ResolveAccountColumnIndex(targetHeaders);
+            var formulaTemplateRow = FindFormulaTemplateRow(
+                targetSheet,
+                targetHeaderRowIndex + 1,
+                targetSheet.LastRowNum);
 
             var nextTargetRowIndex = targetHeaderRowIndex + 1;
 
@@ -379,6 +383,11 @@ public sealed class ExcelImportJob
                     })
                     .Where(column => column.Header.Length > 0 && column.SourceColumnIndex >= 0)
                     .ToList();
+                var dataColumnIndexes = writableColumns
+                    .Select(column => column.TargetColumnIndex)
+                    .Append(accountColumnIndex)
+                    .Where(columnIndex => columnIndex >= 0)
+                    .ToHashSet();
 
                 if (nextTargetRowIndex == targetHeaderRowIndex + 1)
                 {
@@ -410,6 +419,7 @@ public sealed class ExcelImportJob
                         SetCellValue(targetRow.CreateCell(accountColumnIndex), accountName, cellStyleCache);
                     }
 
+                    FillMissingFormulaCells(formulaTemplateRow, targetRow, dataColumnIndexes);
                     importedCounts[sheetName]++;
                     nextTargetRowIndex++;
                 }
@@ -2995,6 +3005,10 @@ public sealed class ExcelImportJob
         var targetHeaders = ReadRow(targetSheet.GetRow(targetHeaderRowIndex), formatter)
             .Select(DelimitedTableReader.CleanHeader)
             .ToList();
+        var formulaTemplateRow = FindFormulaTemplateRow(
+            targetSheet,
+            targetHeaderRowIndex + 1,
+            targetSheet.LastRowNum);
         var sourceIndex = BuildHeaderIndex(sourceTable.Headers);
         var writableColumns = targetHeaders
             .Select((header, columnIndex) => new CopyColumn(
@@ -3009,6 +3023,9 @@ public sealed class ExcelImportJob
             throw new InvalidOperationException($"No matching columns for sheet: {targetSheet.SheetName}");
         }
 
+        var dataColumnIndexes = writableColumns
+            .Select(column => column.TargetColumnIndex)
+            .ToHashSet();
         ClearDataRows(targetSheet, targetHeaderRowIndex + 1, targetSheet.LastRowNum, preserveFormulas: true);
 
         var nextTargetRowIndex = targetHeaderRowIndex + 1;
@@ -3024,6 +3041,7 @@ public sealed class ExcelImportJob
                 SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
             }
 
+            FillMissingFormulaCells(formulaTemplateRow, targetRow, dataColumnIndexes);
             nextTargetRowIndex++;
         }
 
@@ -3050,6 +3068,14 @@ public sealed class ExcelImportJob
         var copyColumns = MappingImportHeaders
             .Select(header => new CopyColumn(-1, ResolveRequiredColumn(targetHeaderIndex, header, targetSheet.SheetName), header))
             .ToList();
+        var formulaTemplateRow = FindFormulaTemplateRow(
+            targetSheet,
+            targetHeaderRowIndex + 1,
+            targetSheet.LastRowNum);
+        var dataColumnIndexes = copyColumns
+            .Select(column => column.TargetColumnIndex)
+            .Append(accountColumnIndex)
+            .ToHashSet();
 
         ClearDataRows(targetSheet, targetHeaderRowIndex + 1, targetSheet.LastRowNum, preserveFormulas: true);
 
@@ -3082,6 +3108,7 @@ public sealed class ExcelImportJob
                 }
 
                 SetCellValue(targetRow.CreateCell(accountColumnIndex), sourceSheet.AccountName, cellStyleCache);
+                FillMissingFormulaCells(formulaTemplateRow, targetRow, dataColumnIndexes);
                 nextTargetRowIndex++;
             }
         }
@@ -3110,6 +3137,14 @@ public sealed class ExcelImportJob
         var copyColumns = MappingImportHeaders
             .Select(header => new CopyColumn(-1, ResolveRequiredColumn(targetHeaderIndex, header, targetSheet.SheetName), header))
             .ToList();
+        var formulaTemplateRow = FindFormulaTemplateRow(
+            targetSheet,
+            targetHeaderRowIndex + 1,
+            targetSheet.LastRowNum);
+        var dataColumnIndexes = copyColumns
+            .Select(column => column.TargetColumnIndex)
+            .Append(accountColumnIndex)
+            .ToHashSet();
 
         ClearDataRows(targetSheet, targetHeaderRowIndex + 1, targetSheet.LastRowNum, preserveFormulas: true);
 
@@ -3141,6 +3176,7 @@ public sealed class ExcelImportJob
                 }
 
                 SetCellValue(targetRow.CreateCell(accountColumnIndex), sourceSheet.AccountName, cellStyleCache);
+                FillMissingFormulaCells(formulaTemplateRow, targetRow, dataColumnIndexes);
                 nextTargetRowIndex++;
             }
         }
@@ -3256,7 +3292,6 @@ public sealed class ExcelImportJob
                 var value = refundRow.TryGetValue(header, out var cellValue) ? cellValue : string.Empty;
                 SetCellValue(targetRow.CreateCell(targetHeaderIndex[header]), value, cellStyleCache);
             }
-
             nextTargetRowIndex++;
         }
 
@@ -3557,6 +3592,41 @@ public sealed class ExcelImportJob
 
     private static void CopyFormulaTemplateCells(IRow? templateRow, IRow targetRow, ISet<int> dataColumnIndexes)
     {
+        FillFormulaTemplateCells(templateRow, targetRow, dataColumnIndexes, overwriteExisting: true);
+    }
+
+    private static void FillMissingFormulaCells(IRow? templateRow, IRow targetRow, ISet<int> dataColumnIndexes)
+    {
+        FillFormulaTemplateCells(templateRow, targetRow, dataColumnIndexes, overwriteExisting: false);
+    }
+
+    private static IRow? FindFormulaTemplateRow(ISheet sheet, int startRowIndex, int endRowIndex)
+    {
+        if (endRowIndex < startRowIndex)
+        {
+            return null;
+        }
+
+        for (var rowIndex = Math.Max(startRowIndex, sheet.FirstRowNum);
+             rowIndex <= Math.Min(endRowIndex, sheet.LastRowNum);
+             rowIndex++)
+        {
+            var row = sheet.GetRow(rowIndex);
+            if (row?.Cells.Any(cell => cell.CellType == CellType.Formula) == true)
+            {
+                return row;
+            }
+        }
+
+        return null;
+    }
+
+    private static void FillFormulaTemplateCells(
+        IRow? templateRow,
+        IRow targetRow,
+        ISet<int> dataColumnIndexes,
+        bool overwriteExisting)
+    {
         if (templateRow is null)
         {
             return;
@@ -3570,7 +3640,13 @@ public sealed class ExcelImportJob
                 continue;
             }
 
-            var targetCell = targetRow.GetCell(templateCell.ColumnIndex) ?? targetRow.CreateCell(templateCell.ColumnIndex);
+            var targetCell = targetRow.GetCell(templateCell.ColumnIndex);
+            if (!overwriteExisting && targetCell?.CellType == CellType.Formula)
+            {
+                continue;
+            }
+
+            targetCell ??= targetRow.CreateCell(templateCell.ColumnIndex);
             targetCell.CellStyle = templateCell.CellStyle;
             targetCell.SetCellFormula(AdjustFormulaRows(templateCell.CellFormula, rowOffset));
         }
