@@ -10,9 +10,12 @@ var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
     ContentRootPath = AppContext.BaseDirectory
 });
 
+builder.Configuration.AddJsonFile("daily-report-profile.json", optional: false, reloadOnChange: true);
+
 builder.Services.Configure<ExcelImportOptions>(builder.Configuration.GetSection("ExcelImport"));
 builder.Services.Configure<FileLogOptions>(builder.Configuration.GetSection("FileLog"));
 builder.Services.Configure<FeishuOptions>(builder.Configuration.GetSection("Feishu"));
+builder.Services.Configure<DailyReportProfileOptions>(builder.Configuration.GetSection("DailyReportProfile"));
 builder.Services.PostConfigure<ExcelImportOptions>(options =>
 {
     // Allow manual backfill or local verification without changing appsettings.json.

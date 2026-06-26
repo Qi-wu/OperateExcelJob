@@ -68,6 +68,25 @@ Backfill the supplied sample date:
 dotnet run --project OperateExcel.Job\OperateExcel.Job.csproj -- --run-once --date=2026-05-22
 ```
 
+## Daily report profile
+
+People and store profile data used by daily summary generation is configured in:
+
+```text
+OperateExcel.Job\daily-report-profile.json
+```
+
+The program reads the `DailyReportProfile` section from this file. Use it to maintain:
+
+- `People`: operator names, display order, and each person's `PaymentMonthlyBudget`.
+- `Stores`: store/account names and their display order in generated summary blocks.
+- `Stores[].People`: the people included in that store's person-level statistics.
+- `Stores[].SourceDirectoryNames`: source folder names that should be imported as this store/account.
+- `Stores[].MappingSheetNameCandidates`: Feishu mapping spreadsheet sheet titles that belong to this store/account.
+- `SkuOwners`: the `sku归属` operator-code to person-name mapping. The generated workbook's `sku归属` sheet is refreshed from this section, and summary aggregation uses the same values.
+
+In Windows service mode the profile file is watched by configuration reload. Each daily report run rebuilds the profile from the current JSON value at the start of the run, so later runs use profile edits without changing code.
+
 ## Windows Service
 
 The job runs as a .NET background service and can be registered as a Windows service. The schedule is controlled by `ExcelImport:DailyCron`, defaulting to `0 2 * * *` (02:00 local time every day). Only daily cron expressions in the form `minute hour * * *` are supported.

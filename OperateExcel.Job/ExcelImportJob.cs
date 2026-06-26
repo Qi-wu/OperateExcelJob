@@ -16,6 +16,7 @@ public sealed class ExcelImportJob
     private const string PaymentsSheetName = "payments";
     private const string MappingSheetName = "\u6620\u5c04\u8868";
     private const string RmaSheetName = "RMA\u7533\u8bf7\u8868";
+    private const string SkuOwnerSheetName = "\u0073\u006b\u0075\u5f52\u5c5e";
     private const string FulfillmentTemplateSheetName = "\u6a21\u7248F";
     private const string PaymentTemplateSheetName = "\u6a21\u677fP";
     private const string SummarySheetName = "\u6c47\u603b";
@@ -59,70 +60,6 @@ public sealed class ExcelImportJob
             ["shipping credits"] = "shipping-price",
             ["gift wrap credits"] = "gift wrap credits",
             ["total"] = "total"
-        };
-
-    private static readonly IReadOnlyList<string> StoreReadOrder =
-    [
-        "\u65e0\u5fe7\u65e0\u8651",
-        "Oyumoents",
-        "Yue an Company",
-        "DUX"
-    ];
-
-    private static readonly IReadOnlyList<string> FulfillmentSummaryPeople =
-    [
-        "\u83ab\u7f8e\u7389",
-        "\u4e01\u82b3\u82b3",
-        "\u6b27\u9633\u535a\u6587",
-        "\u5176\u4ed6",
-        "\u8bb8\u6893\u6e1d",
-        "\u8c2d\u71b9\u6770",
-        "\u5510\u7487\u6dd1",
-        "\u674e\u5c0f\u5a49",
-        "\u6731\u5c0f\u71d5"
-    ];
-
-    private static readonly IReadOnlyList<string> FulfillmentSummaryStores =
-    [
-        "\u65e0\u5fe7\u65e0\u8651",
-        "OYU",
-        "AN",
-        "DUX"
-    ];
-
-    private static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> StorePeople =
-        new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["\u65e0\u5fe7\u65e0\u8651"] =
-            [
-                "\u83ab\u7f8e\u7389",
-                "\u4e01\u82b3\u82b3",
-                "\u6b27\u9633\u535a\u6587",
-                "\u5176\u4ed6",
-                "\u8bb8\u6893\u6e1d",
-                "\u8c2d\u71b9\u6770"
-            ],
-            ["AN"] =
-            [
-                "\u83ab\u7f8e\u7389",
-                "\u5176\u4ed6",
-                "\u8c2d\u71b9\u6770",
-                "\u6731\u5c0f\u71d5"
-            ],
-            ["OYU"] =
-            [
-                "\u8bb8\u6893\u6e1d",
-                "\u8c2d\u71b9\u6770",
-                "\u674e\u5c0f\u5a49"
-            ],
-            ["DUX"] =
-            [
-                "\u4e01\u82b3\u82b3",
-                "\u6b27\u9633\u535a\u6587",
-                "\u8bb8\u6893\u6e1d",
-                "\u8c2d\u71b9\u6770",
-                "\u5510\u7487\u6dd1"
-            ]
         };
 
     private static readonly IReadOnlyList<string> FulfillmentSummaryHeaders =
@@ -179,38 +116,6 @@ public sealed class ExcelImportJob
         "\u7d2f\u79efpayments"
     ];
 
-    private static readonly IReadOnlyDictionary<string, double> PaymentMonthlyBudgetByPerson =
-        new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["\u83ab\u7f8e\u7389"] = 522425D,
-            ["\u4e01\u82b3\u82b3"] = 428121D,
-            ["\u6b27\u9633\u535a\u6587"] = 504162D,
-            ["\u5176\u4ed6"] = 0D,
-            ["\u8bb8\u6893\u6e1d"] = 0D,
-            ["\u8c2d\u71b9\u6770"] = 221994D,
-            ["\u5510\u7487\u6dd1"] = 145832D,
-            ["\u674e\u5c0f\u5a49"] = 0D,
-            ["\u6731\u5c0f\u71d5"] = 0D
-        };
-
-    private static readonly IReadOnlyDictionary<string, string> StoreAccountNames =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["\u65e0\u5fe7\u65e0\u8651"] = "\u65e0\u5fe7\u65e0\u8651",
-            ["Oyumoents"] = "OYU",
-            ["Yue an Company"] = "AN",
-            ["Dux"] = "DUX",
-            ["DUX"] = "DUX"
-        };
-
-    private static readonly IReadOnlyList<MappingSourceSheet> MappingSourceSheets =
-    [
-        new("\u65e0\u5fe7\u65e0\u8651", ["WUYOU", "\u65e0\u5fe7\u65e0\u8651"]),
-        new("OYU", ["OYUMOENTS \u6620\u5c04", "OYUMOENTS\u6620\u5c04", "OYUMOENTS \u6620\u5c04\u8868", "OYUMOENTS\u6620\u5c04\u8868"]),
-        new("AN", ["AN\u6620\u5c04\u8868", "AN \u6620\u5c04\u8868", "AN\u6620\u5c04", "AN \u6620\u5c04"]),
-        new("DUX", ["DUX \u6620\u5c04", "DUX\u6620\u5c04", "DUX \u6620\u5c04\u8868", "DUX\u6620\u5c04\u8868"])
-    ];
-
     private static readonly IReadOnlySet<string> MappingImportHeaders =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -262,17 +167,28 @@ public sealed class ExcelImportJob
 
     private readonly ExcelImportOptions _options;
     private readonly FeishuOptions _feishuOptions;
+    private readonly IOptionsMonitor<DailyReportProfileOptions> _profileOptions;
     private readonly FeishuApiClient _feishuClient;
     private readonly ILogger<ExcelImportJob> _logger;
+    private DailyReportProfile _profile;
+    private IReadOnlyList<string> StoreReadOrder => _profile.SourceDirectoryReadOrder;
+    private IReadOnlyList<string> FulfillmentSummaryPeople => _profile.People;
+    private IReadOnlyList<string> FulfillmentSummaryStores => _profile.Stores;
+    private IReadOnlyDictionary<string, double> PaymentMonthlyBudgetByPerson => _profile.PaymentMonthlyBudgetByPerson;
+    private IEnumerable<MappingSourceSheet> MappingSourceSheets => FulfillmentSummaryStores
+        .Select(store => new MappingSourceSheet(store, _profile.MappingSheetNameCandidatesByStore[store]));
 
     public ExcelImportJob(
         IOptions<ExcelImportOptions> options,
         IOptions<FeishuOptions> feishuOptions,
+        IOptionsMonitor<DailyReportProfileOptions> profileOptions,
         FeishuApiClient feishuClient,
         ILogger<ExcelImportJob> logger)
     {
         _options = options.Value;
         _feishuOptions = feishuOptions.Value;
+        _profileOptions = profileOptions;
+        _profile = DailyReportProfile.FromOptions(profileOptions.CurrentValue);
         _feishuClient = feishuClient;
         _logger = logger;
     }
@@ -286,6 +202,7 @@ public sealed class ExcelImportJob
     private ImportResult Run()
     {
         // One run produces one dated workbook from that date's source folder and then publishes it back to Feishu.
+        _profile = DailyReportProfile.FromOptions(_profileOptions.CurrentValue);
         var messages = new List<string>();
         var processingDate = ResolveProcessingDate();
         var dateFolderName = processingDate.ToString("yyyy-MM-dd");
@@ -671,6 +588,7 @@ public sealed class ExcelImportJob
 
         var copiedFulfillmentRows = CopyFilteredFulfillmentRowsToTemplate(workbook, formatter, cellStyleCache);
         var copiedPaymentRows = CopyOrderPaymentRowsToTemplate(workbook, formatter, cellStyleCache);
+        UpsertSkuOwnerSheet(workbook, cellStyleCache);
         UpsertStorePersonRelationSheet(workbook, cellStyleCache);
         if (processingDate.Day == 1)
         {
@@ -689,6 +607,7 @@ public sealed class ExcelImportJob
         messages.Add($"Highlighted {highlightedOrderIds} fulfillment rows from {WaitingOrderFileName}.");
         messages.Add($"Copied {copiedFulfillmentRows} fulfillment rows to sheet {FulfillmentTemplateSheetName}.");
         messages.Add($"Copied {copiedPaymentRows} payment rows to sheet {PaymentTemplateSheetName}.");
+        messages.Add($"Updated sheet {SkuOwnerSheetName}.");
         messages.Add($"Updated sheet {StorePersonRelationSheetName}.");
         messages.Add($"Generated {generatedFulfillmentSummary.BlockCount} fulfillment summary templates from row {FulfillmentSummaryStartRowIndex + 1}.");
         messages.Add($"Appended {appendedStoreDailySummaryRows} rows to store daily summary sheets.");
@@ -696,7 +615,7 @@ public sealed class ExcelImportJob
         messages.Add($"Appended {generatedDailySummaryRows} rows to sheet {SummarySheetName}.");
     }
 
-    private static void ClearMonthlyDailySummarySheets(IWorkbook workbook)
+    private void ClearMonthlyDailySummarySheets(IWorkbook workbook)
     {
         // Month-start runs keep the workbook structure but remove prior-month accumulated daily rows.
         var summarySheet = workbook.GetSheet(SummarySheetName);
@@ -1006,7 +925,7 @@ public sealed class ExcelImportJob
         return nextTargetRowIndex - targetHeaderRowIndex - 1;
     }
 
-    private static FulfillmentSummaryGenerationResult GenerateFulfillmentSummaryTemplates(IWorkbook workbook)
+    private FulfillmentSummaryGenerationResult GenerateFulfillmentSummaryTemplates(IWorkbook workbook)
     {
         // Generated summary blocks mirror the manual template layout while expanding store/person sections consistently.
         var sheet = workbook.GetSheet(FulfillmentTemplateSheetName)
@@ -1056,7 +975,7 @@ public sealed class ExcelImportJob
             allStoreFirstPersonRowIndex + FulfillmentSummaryPeople.Count - 1);
     }
 
-    private static int CreateStoreSummaryTemplate(
+    private int CreateStoreSummaryTemplate(
         ISheet sheet,
         int headerRowIndex,
         int startColumnIndex,
@@ -1096,14 +1015,36 @@ public sealed class ExcelImportJob
         return totalRowIndex + 1;
     }
 
-    private static IReadOnlyList<string> ResolveStorePeople(string storeName)
+    private IReadOnlyList<string> ResolveStorePeople(string storeName)
     {
-        return StorePeople.TryGetValue(storeName, out var people)
+        return _profile.StorePeople.TryGetValue(storeName, out var people)
             ? people
             : FulfillmentSummaryPeople;
     }
 
-    private static void UpsertStorePersonRelationSheet(IWorkbook workbook, CellStyleCache cellStyleCache)
+    private void UpsertSkuOwnerSheet(IWorkbook workbook, CellStyleCache cellStyleCache)
+    {
+        var sheet = workbook.GetSheet(SkuOwnerSheetName)
+            ?? workbook.CreateSheet(SkuOwnerSheetName);
+
+        ClearSheetDataRange(sheet, 0, 0, 5);
+
+        var headerRow = sheet.GetRow(0) ?? sheet.CreateRow(0);
+        SetCellValue(headerRow.CreateCell(0), "\u8fd0\u8425", cellStyleCache);
+        SetCellValue(headerRow.CreateCell(1), "\u59d3\u540d", cellStyleCache);
+        SetCellValue(headerRow.CreateCell(4), "\u8d26\u53f7\u540d\u79f0", cellStyleCache);
+
+        for (var i = 0; i < _profile.SkuOwners.Count; i++)
+        {
+            var owner = _profile.SkuOwners[i];
+            var row = sheet.GetRow(i + 1) ?? sheet.CreateRow(i + 1);
+            SetCellValue(row.CreateCell(0), owner.OwnerCode, cellStyleCache);
+            SetCellValue(row.CreateCell(1), owner.Name, cellStyleCache);
+            SetCellValue(row.CreateCell(4), owner.AccountName ?? string.Empty, cellStyleCache);
+        }
+    }
+
+    private void UpsertStorePersonRelationSheet(IWorkbook workbook, CellStyleCache cellStyleCache)
     {
         // This helper sheet is used by Excel formulas/pivots and documents the store -> operator ownership matrix.
         var sheet = workbook.GetSheet(StorePersonRelationSheetName)
@@ -1144,7 +1085,7 @@ public sealed class ExcelImportJob
         }
     }
 
-    private static int AppendStoreDailySummarySheets(
+    private int AppendStoreDailySummarySheets(
         IWorkbook workbook,
         DateOnly processingDate,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, DailySummaryMetrics>> storeDailyMetrics,
@@ -1435,7 +1376,7 @@ public sealed class ExcelImportJob
         }
     }
 
-    private static void CreateAllStoreSummaryTemplate(
+    private void CreateAllStoreSummaryTemplate(
         ISheet sheet,
         int titleRowIndex,
         int startColumnIndex,
@@ -1557,7 +1498,7 @@ public sealed class ExcelImportJob
         }
     }
 
-    private static int GeneratePaymentSummaryTemplates(IWorkbook workbook)
+    private int GeneratePaymentSummaryTemplates(IWorkbook workbook)
     {
         var sheet = workbook.GetSheet(PaymentTemplateSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {PaymentTemplateSheetName}");
@@ -1585,7 +1526,7 @@ public sealed class ExcelImportJob
         return FulfillmentSummaryStores.Count;
     }
 
-    private static int CreatePaymentStoreSummaryTemplate(
+    private int CreatePaymentStoreSummaryTemplate(
         ISheet sheet,
         int headerRowIndex,
         int startColumnIndex,
@@ -1803,7 +1744,7 @@ public sealed class ExcelImportJob
         }
     }
 
-    private static int AppendDailySummaryTemplates(
+    private int AppendDailySummaryTemplates(
         IWorkbook workbook,
         DateOnly processingDate,
         FulfillmentSummaryGenerationResult fulfillmentSummary,
@@ -1835,7 +1776,7 @@ public sealed class ExcelImportJob
         return FulfillmentSummaryPeople.Count + FulfillmentSummaryPeople.Count + 1;
     }
 
-    private static IReadOnlyDictionary<string, DailySummaryMetrics> BuildDailySummaryMetrics(
+    private IReadOnlyDictionary<string, DailySummaryMetrics> BuildDailySummaryMetrics(
         IWorkbook workbook,
         DataFormatter formatter)
     {
@@ -1855,7 +1796,7 @@ public sealed class ExcelImportJob
         return metricsByPerson;
     }
 
-    private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, DailySummaryMetrics>> BuildStoreDailySummaryMetrics(
+    private IReadOnlyDictionary<string, IReadOnlyDictionary<string, DailySummaryMetrics>> BuildStoreDailySummaryMetrics(
         IWorkbook workbook,
         DataFormatter formatter)
     {
@@ -1881,12 +1822,12 @@ public sealed class ExcelImportJob
             StringComparer.OrdinalIgnoreCase);
     }
 
-    private static Dictionary<string, SkuMapping> ReadSkuMappings(IWorkbook workbook, DataFormatter formatter)
+    private Dictionary<string, SkuMapping> ReadSkuMappings(IWorkbook workbook, DataFormatter formatter)
     {
         // The mapping sheet ties marketplace SKU to B2B item code and operator; this is the spine of metric ownership.
         var sheet = workbook.GetSheet(MappingSheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {MappingSheetName}");
-        var ownerNamesByCode = ReadSkuOwnerNames(workbook, formatter);
+        var ownerNamesByCode = _profile.SkuOwnerNamesByCode;
         var headerRowIndex = FindHeaderRow(sheet, formatter);
         var headerIndex = ReadHeaderIndex(sheet, headerRowIndex, formatter);
         var skuColumnIndex = ResolveRequiredColumn(headerIndex, "\u5e73\u53f0SKU", MappingSheetName);
@@ -1918,36 +1859,6 @@ public sealed class ExcelImportJob
         }
 
         return mappings;
-    }
-
-    private static Dictionary<string, string> ReadSkuOwnerNames(IWorkbook workbook, DataFormatter formatter)
-    {
-        // Some mapping rows use operator codes; normalize them to display names before summary aggregation.
-        var sheet = workbook.GetSheet("\u0073\u006b\u0075\u5f52\u5c5e")
-            ?? throw new InvalidOperationException("Sheet not found: sku\u5f52\u5c5e");
-        var headerRowIndex = FindHeaderRow(sheet, formatter);
-        var headerIndex = ReadHeaderIndex(sheet, headerRowIndex, formatter);
-        var ownerCodeColumnIndex = ResolveRequiredColumn(headerIndex, "\u8fd0\u8425", sheet.SheetName);
-        var ownerNameColumnIndex = ResolveRequiredColumn(headerIndex, "\u59d3\u540d", sheet.SheetName);
-        var ownerNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        for (var rowIndex = headerRowIndex + 1; rowIndex <= sheet.LastRowNum; rowIndex++)
-        {
-            var row = sheet.GetRow(rowIndex);
-            if (row is null)
-            {
-                continue;
-            }
-
-            var ownerCode = NormalizePersonName(formatter.FormatCellValue(row.GetCell(ownerCodeColumnIndex)));
-            var ownerName = formatter.FormatCellValue(row.GetCell(ownerNameColumnIndex)).Trim();
-            if (ownerCode.Length > 0 && ownerName.Length > 0)
-            {
-                ownerNames[ownerCode] = ownerName;
-            }
-        }
-
-        return ownerNames;
     }
 
     private static Dictionary<string, double> ReadB2BCosts(IWorkbook workbook, DataFormatter formatter)
@@ -2142,7 +2053,7 @@ public sealed class ExcelImportJob
         }
     }
 
-    private static void AddStoreFulfillmentMetrics(
+    private void AddStoreFulfillmentMetrics(
         IWorkbook workbook,
         DataFormatter formatter,
         IReadOnlyDictionary<string, SkuMapping> skuMappings,
@@ -2205,7 +2116,7 @@ public sealed class ExcelImportJob
         }
     }
 
-    private static void AddStoreAdvertisingMetrics(
+    private void AddStoreAdvertisingMetrics(
         IWorkbook workbook,
         DataFormatter formatter,
         IReadOnlyDictionary<string, SkuMapping> skuMappings,
@@ -2253,7 +2164,7 @@ public sealed class ExcelImportJob
         }
     }
 
-    private static void AddStorePaymentMetrics(
+    private void AddStorePaymentMetrics(
         IWorkbook workbook,
         DataFormatter formatter,
         IReadOnlyDictionary<string, SkuMapping> skuMappings,
@@ -2329,7 +2240,7 @@ public sealed class ExcelImportJob
             : fallbackColumnIndex;
     }
 
-    private static bool TryResolveStore(string rawStoreName, out string storeName)
+    private bool TryResolveStore(string rawStoreName, out string storeName)
     {
         var normalized = NormalizeSheetName(rawStoreName);
         foreach (var store in FulfillmentSummaryStores)
@@ -2410,7 +2321,7 @@ public sealed class ExcelImportJob
             : 0D;
     }
 
-    private static void AppendFirstDailySummaryRows(
+    private void AppendFirstDailySummaryRows(
         ISheet summarySheet,
         DateOnly processingDate,
         int startRowIndex,
@@ -2466,7 +2377,7 @@ public sealed class ExcelImportJob
         SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "payment\u6ea2\u4ef7", sheetName), metrics.PaymentPremium);
     }
 
-    private static void AppendSecondDailySummaryRows(
+    private void AppendSecondDailySummaryRows(
         ISheet summarySheet,
         DateOnly processingDate,
         int startRowIndex,
@@ -2502,7 +2413,7 @@ public sealed class ExcelImportJob
         ApplySecondDailySummaryTotalStyle(summarySheet, totalRow, cellStyleCache);
     }
 
-    private static void SetSecondDailySummaryPersonFormulas(IRow row, string personName, CellStyleCache cellStyleCache)
+    private void SetSecondDailySummaryPersonFormulas(IRow row, string personName, CellStyleCache cellStyleCache)
     {
         var rowNumber = row.RowNum + 1;
         var personRef = CellReference(PaymentSecondDailySummaryStartColumnIndex + 1, rowNumber);
@@ -2802,7 +2713,7 @@ public sealed class ExcelImportJob
         return $"{processingDate.Year}.{processingDate.Month}\u6708\u65e5\u62a5{processingDate.Day}\u65e5.xlsx";
     }
 
-    private static IEnumerable<string> OrderStoreDirectories(IEnumerable<string> storeDirectories)
+    private IEnumerable<string> OrderStoreDirectories(IEnumerable<string> storeDirectories)
     {
         var order = StoreReadOrder
             .Select((storeName, index) => new { storeName, index })
@@ -2821,9 +2732,9 @@ public sealed class ExcelImportJob
                 : targetHeader;
     }
 
-    private static string ResolveAccountName(string storeName)
+    private string ResolveAccountName(string storeName)
     {
-        return StoreAccountNames.TryGetValue(storeName, out var accountName)
+        return _profile.SourceDirectoryAccountNames.TryGetValue(storeName, out var accountName)
             ? accountName
             : storeName;
     }
@@ -3048,7 +2959,7 @@ public sealed class ExcelImportJob
         return sourceTable.Rows.Count;
     }
 
-    private static int CopyMappingSheetsToTarget(
+    private int CopyMappingSheetsToTarget(
         IWorkbook sourceWorkbook,
         ISheet targetSheet,
         DataFormatter formatter,
@@ -3116,7 +3027,7 @@ public sealed class ExcelImportJob
         return nextTargetRowIndex - targetHeaderRowIndex - 1;
     }
 
-    private static int CopyMappingSpreadsheetSheetsToTarget(
+    private int CopyMappingSpreadsheetSheetsToTarget(
         IReadOnlyList<FeishuSpreadsheetSheetData> sourceSheets,
         ISheet targetSheet,
         DataFormatter formatter,
