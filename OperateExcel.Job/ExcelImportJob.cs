@@ -1099,6 +1099,7 @@ public sealed class ExcelImportJob
             var storePeople = ResolveStorePeople(store);
             var targetSheet = FindSheet(workbook, store) ?? workbook.CreateSheet(store);
             EnsureStoreDailySummaryHeaders(targetSheet, cellStyleCache);
+            FreezeHeaderRow(targetSheet);
 
             var nextTargetRowIndex = FindNextAppendRowIndex(
                 targetSheet,
@@ -1245,23 +1246,23 @@ public sealed class ExcelImportJob
         var personRef = CellReference(StoreDailySummaryStartColumnIndex + 1, rowNumber);
 
         SetFormulaCell(row, 16, $"SUMIFS($C:$C,$A:$A,{dateRef},$B:$B,{personRef})");
-        SetFormulaCell(row, 17, $"SUMIFS($D:$D,$A:$A,{dateRef},$B:$B,{personRef})");
-        SetFormulaCell(row, 18, $"SUMIFS($E:$E,$A:$A,{dateRef},$B:$B,{personRef})");
-        SetFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,{dateRef},$B:$B,{personRef})");
-        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetRoundedFormulaCell(row, 17, $"SUMIFS($D:$D,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 18, $"SUMIFS($E:$E,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
         SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
         SetPercentCellStyle(row, 22, cellStyleCache);
-        SetFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,{dateRef},$B:$B,{personRef})");
         SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
         SetPercentCellStyle(row, 24, cellStyleCache);
-        SetFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,{dateRef},$B:$B,{personRef})");
-        SetFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,{dateRef},$B:$B,{personRef})");
-        SetFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
+        SetRoundedFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,{dateRef},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
         SetPercentCellStyle(row, 28, cellStyleCache);
-        SetFormulaCell(row, 29, $"X{rowNumber}+Z{rowNumber}");
+        SetRoundedFormulaCell(row, 29, $"X{rowNumber}+Z{rowNumber}");
     }
 
     private static void SetStoreDailySummaryTotalFormulas(
@@ -1274,13 +1275,14 @@ public sealed class ExcelImportJob
         var firstRowNumber = firstPersonRowIndex + 1;
         var lastRowNumber = lastPersonRowIndex + 1;
 
-        foreach (var columnIndex in new[] { 16, 17, 18, 19, 23, 25, 26, 27, 29 })
+        SetFormulaCell(row, 16, $"SUM(Q{firstRowNumber}:Q{lastRowNumber})");
+        foreach (var columnIndex in new[] { 17, 18, 19, 23, 25, 26, 27, 29 })
         {
             var columnName = ColumnIndexToName(columnIndex);
-            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+            SetRoundedFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
         }
 
-        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetRoundedFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
         SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
@@ -1754,6 +1756,7 @@ public sealed class ExcelImportJob
         // The main summary sheet receives one daily row per operator plus a second formula block with totals.
         var summarySheet = workbook.GetSheet(SummarySheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {SummarySheetName}");
+        FreezeHeaderRow(summarySheet);
         var dailyMetrics = BuildDailySummaryMetrics(workbook, formatter);
 
         var firstSummaryRowIndex = FindNextAppendRowIndex(summarySheet, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryColumnCount);
@@ -2352,13 +2355,13 @@ public sealed class ExcelImportJob
     private static void SetDailySummaryMetricCells(IRow row, DailySummaryMetrics metrics)
     {
         SetNumericCell(row, 2, metrics.Orders);
-        SetNumericCell(row, 3, metrics.SalesTotal);
-        SetNumericCell(row, 4, metrics.Premium);
-        SetNumericCell(row, 5, metrics.AdvertisingCost);
-        SetNumericCell(row, 6, metrics.Premium - metrics.AdvertisingCost);
-        SetNumericCell(row, 7, metrics.Payments);
-        SetNumericCell(row, 8, metrics.Refund);
-        SetNumericCell(row, 9, metrics.PaymentPremium);
+        SetRoundedSummaryMetricCell(row, 3, metrics.SalesTotal);
+        SetRoundedSummaryMetricCell(row, 4, metrics.Premium);
+        SetRoundedSummaryMetricCell(row, 5, metrics.AdvertisingCost);
+        SetRoundedSummaryMetricCell(row, 6, metrics.Premium - metrics.AdvertisingCost);
+        SetRoundedSummaryMetricCell(row, 7, metrics.Payments);
+        SetRoundedSummaryMetricCell(row, 8, metrics.Refund);
+        SetRoundedSummaryMetricCell(row, 9, metrics.PaymentPremium);
     }
 
     private static void SetDailySummaryMetricCells(
@@ -2368,13 +2371,13 @@ public sealed class ExcelImportJob
         string sheetName)
     {
         SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u8ba2\u5355", sheetName), metrics.Orders);
-        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u9500\u552e\u603b\u989d", sheetName), metrics.SalesTotal);
-        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u6ea2\u4ef7", sheetName), metrics.Premium);
-        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u5e7f\u544a\u82b1\u8d39", sheetName), metrics.AdvertisingCost);
-        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u6700\u7ec8\u6ea2\u4ef7", sheetName), metrics.Premium - metrics.AdvertisingCost);
-        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "payments", sheetName), metrics.Payments);
-        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "Refund", sheetName), metrics.Refund);
-        SetNumericCell(row, ResolveRequiredColumn(targetHeaderIndex, "payment\u6ea2\u4ef7", sheetName), metrics.PaymentPremium);
+        SetRoundedSummaryMetricCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u9500\u552e\u603b\u989d", sheetName), metrics.SalesTotal);
+        SetRoundedSummaryMetricCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u6ea2\u4ef7", sheetName), metrics.Premium);
+        SetRoundedSummaryMetricCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u5e7f\u544a\u82b1\u8d39", sheetName), metrics.AdvertisingCost);
+        SetRoundedSummaryMetricCell(row, ResolveRequiredColumn(targetHeaderIndex, "\u6700\u7ec8\u6ea2\u4ef7", sheetName), metrics.Premium - metrics.AdvertisingCost);
+        SetRoundedSummaryMetricCell(row, ResolveRequiredColumn(targetHeaderIndex, "payments", sheetName), metrics.Payments);
+        SetRoundedSummaryMetricCell(row, ResolveRequiredColumn(targetHeaderIndex, "Refund", sheetName), metrics.Refund);
+        SetRoundedSummaryMetricCell(row, ResolveRequiredColumn(targetHeaderIndex, "payment\u6ea2\u4ef7", sheetName), metrics.PaymentPremium);
     }
 
     private void AppendSecondDailySummaryRows(
@@ -2419,26 +2422,26 @@ public sealed class ExcelImportJob
         var personRef = CellReference(PaymentSecondDailySummaryStartColumnIndex + 1, rowNumber);
 
         SetFormulaCell(row, 16, $"SUMIFS($C:$C,$A:$A,O{rowNumber},$B:$B,{personRef})");
-        SetFormulaCell(row, 17, $"SUMIFS($D:$D,$A:$A,O{rowNumber},$B:$B,{personRef})");
-        SetFormulaCell(row, 18, $"SUMIFS($E:$E,$A:$A,O{rowNumber},$B:$B,{personRef})");
-        SetFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,O{rowNumber},$B:$B,{personRef})");
-        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetRoundedFormulaCell(row, 17, $"SUMIFS($D:$D,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 18, $"SUMIFS($E:$E,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 19, $"SUMIFS($F:$F,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 21, $"IFERROR(T{rowNumber}/R{rowNumber},0)");
         SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"IFERROR(U{rowNumber}/R{rowNumber},0)");
         SetPercentCellStyle(row, 22, cellStyleCache);
-        SetFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 23, $"SUMIFS($I:$I,$A:$A,O{rowNumber},$B:$B,{personRef})");
         SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
         SetPercentCellStyle(row, 24, cellStyleCache);
-        SetFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,O{rowNumber},$B:$B,{personRef})");
-        SetFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,O{rowNumber},$B:$B,{personRef})");
-        SetFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
+        SetRoundedFormulaCell(row, 25, $"SUMIFS($H:$H,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 26, $"SUMIFS($J:$J,$A:$A,O{rowNumber},$B:$B,{personRef})");
+        SetRoundedFormulaCell(row, 27, $"AA{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
         SetPercentCellStyle(row, 28, cellStyleCache);
-        SetFormulaCell(row, 29, $"AF{rowNumber}/30");
-        SetFormulaCell(row, 30, $"X{rowNumber}+Z{rowNumber}+SUMIFS($AE:$AE,$O:$O,O{rowNumber}-1,$P:$P,{personRef})");
-        SetNumericCell(row, 31, PaymentMonthlyBudgetByPerson.TryGetValue(personName, out var budget) ? budget : 0D);
-        SetFormulaCell(row, 32, $"R{rowNumber}-AD{rowNumber}");
+        SetRoundedFormulaCell(row, 29, $"AF{rowNumber}/30");
+        SetRoundedFormulaCell(row, 30, $"X{rowNumber}+Z{rowNumber}+SUMIFS($AE:$AE,$O:$O,O{rowNumber}-1,$P:$P,{personRef})");
+        SetRoundedSummaryMetricCell(row, 31, PaymentMonthlyBudgetByPerson.TryGetValue(personName, out var budget) ? budget : 0D);
+        SetRoundedFormulaCell(row, 32, $"R{rowNumber}-AD{rowNumber}");
     }
 
     private static void SetSecondDailySummaryTotalFormulas(
@@ -2451,17 +2454,18 @@ public sealed class ExcelImportJob
         var firstRowNumber = firstRowIndex + 1;
         var lastRowNumber = lastRowIndex + 1;
 
-        foreach (var columnIndex in new[] { 16, 17, 18, 19, 23, 25, 26, 27, 29, 30, 31 })
+        SetFormulaCell(row, 16, $"SUM(Q{firstRowNumber}:Q{lastRowNumber})");
+        foreach (var columnIndex in new[] { 17, 18, 19, 23, 25, 26, 27, 29, 30, 31 })
         {
             var columnName = ColumnIndexToName(columnIndex);
-            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+            SetRoundedFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
         }
 
         SetFormulaCell(row, 21, $"T{rowNumber}/R{rowNumber}");
         SetPercentCellStyle(row, 21, cellStyleCache);
         SetFormulaCell(row, 22, $"U{rowNumber}/R{rowNumber}");
         SetPercentCellStyle(row, 22, cellStyleCache);
-        SetFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
+        SetRoundedFormulaCell(row, 20, $"S{rowNumber}-T{rowNumber}");
         SetFormulaCell(row, 24, $"IFERROR(X{rowNumber}/(Z{rowNumber}+X{rowNumber}),0)");
         SetPercentCellStyle(row, 24, cellStyleCache);
         SetFormulaCell(row, 28, $"IFERROR((AA{rowNumber}-T{rowNumber})/Z{rowNumber},0)");
@@ -2661,6 +2665,16 @@ public sealed class ExcelImportJob
         cell.SetCellFormula(formula);
     }
 
+    private static void SetRoundedFormulaCell(IRow row, int columnIndex, string formula)
+    {
+        SetFormulaCell(row, columnIndex, $"ROUND({formula},2)");
+    }
+
+    private static void FreezeHeaderRow(ISheet sheet)
+    {
+        sheet.CreateFreezePane(0, 1);
+    }
+
     private static void SetPercentCellStyle(IRow row, int columnIndex, CellStyleCache cellStyleCache)
     {
         var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
@@ -2671,6 +2685,16 @@ public sealed class ExcelImportJob
     {
         var cell = row.GetCell(columnIndex) ?? row.CreateCell(columnIndex);
         cell.SetCellValue(value);
+    }
+
+    private static void SetRoundedSummaryMetricCell(IRow row, int columnIndex, double value)
+    {
+        SetNumericCell(row, columnIndex, RoundSummaryMetricValue(value));
+    }
+
+    private static double RoundSummaryMetricValue(double value)
+    {
+        return Math.Round(value, 2, MidpointRounding.AwayFromZero);
     }
 
     private static string CellReference(int zeroBasedColumnIndex, int oneBasedRowNumber)
@@ -3084,6 +3108,7 @@ public sealed class ExcelImportJob
                         ? sourceRow[column.SourceColumnIndex]
                         : string.Empty;
 
+                    value = CleanMappingImportValue(column.Header, value);
                     SetCellValue(targetRow.CreateCell(column.TargetColumnIndex), value, cellStyleCache);
                 }
 
