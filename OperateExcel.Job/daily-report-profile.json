@@ -2,86 +2,205 @@
   "DailyReportProfile": {
     "People": [
       {
-        "Name": "付江爽",
+        "Name": "莫美玉",
+        "PaymentMonthlyBudget": 522425
+      },
+      {
+        "Name": "丁芳芳",
+        "PaymentMonthlyBudget": 428121
+      },
+      {
+        "Name": "欧阳博文",
+        "PaymentMonthlyBudget": 504162
+      },
+      {
+        "Name": "其他",
         "PaymentMonthlyBudget": 0
       },
       {
-        "Name": "龙杨",
+        "Name": "许梓渝",
         "PaymentMonthlyBudget": 0
       },
       {
-        "Name": "DD",
+        "Name": "谭熹杰",
+        "PaymentMonthlyBudget": 221994
+      },
+      {
+        "Name": "唐璇淑",
+        "PaymentMonthlyBudget": 145832
+      },
+      {
+        "Name": "李小婉",
         "PaymentMonthlyBudget": 0
       },
       {
-        "Name": "L001",
+        "Name": "朱小燕",
         "PaymentMonthlyBudget": 0
       }
     ],
     "Stores": [
       {
-        "Name": "DU",
+        "Name": "无忧无虑",
         "People": [
-          "付江爽",
-          "龙杨",
-          "DD",
-          "L001"
+          "莫美玉",
+          "丁芳芳",
+          "欧阳博文",
+          "其他",
+          "许梓渝",
+          "谭熹杰"
         ],
         "SourceDirectoryNames": [
-          "DU"
+          "无忧无虑"
         ],
         "MappingSheetNameCandidates": [
-          "DU",
-          "Du"
+          "WUYOU",
+          "无忧无虑"
         ]
       },
       {
-        "Name": "MING",
+        "Name": "OYU",
         "People": [
-          "付江爽",
-          "龙杨",
-          "DD",
-          "L001"
+          "许梓渝",
+          "谭熹杰",
+          "李小婉"
         ],
         "SourceDirectoryNames": [
-          "ming"
+          "Oyumoents"
         ],
         "MappingSheetNameCandidates": [
-          "ming"
+          "OYUMOENTS 映射",
+          "OYUMOENTS映射",
+          "OYUMOENTS 映射表",
+          "OYUMOENTS映射表"
         ]
       },
       {
-        "Name": "Adolix",
+        "Name": "AN",
         "People": [
-          "付江爽",
-          "龙杨",
-          "DD",
-          "L001"
+          "莫美玉",
+          "其他",
+          "谭熹杰",
+          "朱小燕"
         ],
         "SourceDirectoryNames": [
-          "ADOLIX"
+          "Yue an Company"
         ],
         "MappingSheetNameCandidates": [
-          "ADOLIX"
+          "AN映射表",
+          "AN 映射表",
+          "AN映射",
+          "AN 映射"
+        ]
+      },
+      {
+        "Name": "DUX",
+        "People": [
+          "丁芳芳",
+          "欧阳博文",
+          "许梓渝",
+          "谭熹杰",
+          "唐璇淑"
+        ],
+        "SourceDirectoryNames": [
+          "Dux",
+          "DUX"
+        ],
+        "MappingSheetNameCandidates": [
+          "DUX 映射",
+          "DUX映射",
+          "DUX 映射表",
+          "DUX映射表"
         ]
       }
     ],
     "SkuOwners": [
       {
-        "OwnerCode": "付江爽",
-        "Name": "付江爽"
+        "OwnerCode": "倩倩",
+        "Name": "其他",
+        "AccountName": "无忧无虑"
       },
       {
-        "OwnerCode": "龙杨",
-        "Name": "龙杨"
+        "OwnerCode": "MM",
+        "Name": "莫美玉",
+        "AccountName": "AN"
       },
       {
-        "OwnerCode": "DD",
-        "Name": "DD"
+        "OwnerCode": "801",
+        "Name": "丁芳芳",
+        "AccountName": "OYU"
       },
       {
-        "OwnerCode": "L001",
-        "Name": "L001"
+        "OwnerCode": "806",
+        "Name": "欧阳博文",
+        "AccountName": "DUX"
+      },
+      {
+        "OwnerCode": "808",
+        "Name": "丁芳芳"
+      },
+      {
+        "OwnerCode": "城龙",
+        "Name": "其他"
+      },
+      {
+        "OwnerCode": "YYX",
+        "Name": "其他"
+      },
+      {
+        "OwnerCode": "邱旭满",
+        "Name": "其他"
+      },
+      {
+        "OwnerCode": "易云香",
+        "Name": "其他"
+      },
+      {
+        "OwnerCode": "张颖",
+        "Name": "其他"
+      },
+      {
+        "OwnerCode": "谭熹杰",
+        "Name": "谭熹杰"
+      },
+      {
+        "OwnerCode": "许梓渝",
+        "Name": "许梓渝"
+      },
+      {
+        "OwnerCode": "CY",
+        "Name": "莫美玉"
+      },
+      {
+        "OwnerCode": "818",
+        "Name": "其他"
+      },
+      {
+        "OwnerCode": "XZY",
+        "Name": "许梓渝"
+      },
+      {
+        "OwnerCode": "809",
+        "Name": "唐璇淑"
+      },
+      {
+        "OwnerCode": "FF",
+        "Name": "丁芳芳"
+      },
+      {
+        "OwnerCode": "彭熠",
+        "Name": "其他"
+      },
+      {
+        "OwnerCode": "LYJ",
+        "Name": "谭熹杰"
+      },
+      {
+        "OwnerCode": "李小婉",
+        "Name": "李小婉"
+      },
+      {
+        "OwnerCode": "朱小燕",
+        "Name": "朱小燕"
       }
     ]
   }

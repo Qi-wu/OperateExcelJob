@@ -139,6 +139,15 @@ public sealed class ExcelImportJob
             ["\u8d26\u53f7"] = "\u5e97\u94fa"
         };
 
+    private const int RmaManualHeaderStartColumnIndex = 6; // Excel column G.
+
+    private static readonly IReadOnlyList<string> RmaManualHeaders =
+    [
+        "RMAID",
+        "\u7533\u8bf7\u91d1\u989d",
+        "\u5ba1\u6279\u91d1\u989d"
+    ];
+
     private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> SheetHeaderAliases =
         new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
         {
@@ -3187,7 +3196,7 @@ public sealed class ExcelImportJob
         CellStyleCache cellStyleCache)
     {
         // The RMA workbook can be newly created for a month, so ensure every mapped target column exists before append.
-        var targetHeaders = RmaColumnMap.Values.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var targetHeaders = BuildRmaTargetHeaders();
         var headerRowIndex = FindHeaderRow(targetSheet, formatter);
         IRow headerRow;
         if (headerRowIndex < 0)
@@ -3233,6 +3242,24 @@ public sealed class ExcelImportJob
         }
 
         return refundRows.Count;
+    }
+
+    private static IReadOnlyList<string> BuildRmaTargetHeaders()
+    {
+        var headers = RmaColumnMap.Values.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        for (var i = 0; i < RmaManualHeaders.Count; i++)
+        {
+            var header = RmaManualHeaders[i];
+            if (headers.Contains(header, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var insertIndex = Math.Min(RmaManualHeaderStartColumnIndex + i, headers.Count);
+            headers.Insert(insertIndex, header);
+        }
+
+        return headers;
     }
 
     private static int FindNextAppendRowIndex(ISheet sheet, int headerRowIndex, DataFormatter formatter)
