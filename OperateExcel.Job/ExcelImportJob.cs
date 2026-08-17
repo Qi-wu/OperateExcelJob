@@ -148,13 +148,37 @@ public sealed class ExcelImportJob
         "\u5ba1\u6279\u91d1\u989d"
     ];
 
-    private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> SheetHeaderAliases =
-        new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
+D:\publish\OperateExcelJob(SenYou)>.\OperateExcel.Job.exe --run-once --date=2026-08-15
+Unhandled exception. System.IO.FileNotFoundException: Template file not found.
+File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
+   at OperateExcel.Job.ExcelImportJob.CreateReportBaseFile(String outputFilePath, DateOnly processingDate, ICollection`1 messages) in E:\OperateExcelJob-main\OperateExcel.Job\ExcelImportJob.cs:line 416
+   at OperateExcel.Job.ExcelImportJob.Run() in E:\OperateExcelJob-main\OperateExcel.Job\ExcelImportJob.cs:line 239
+   at System.Threading.Tasks.Task`1.InnerInvoke()
+   at System.Threading.ExecutionContext.RunFromThreadPoolDispatchLoop(Thread threadPoolThread, ExecutionContext executionContext, ContextCallback callback, Object state)
+--- End of stack trace from previous location ---
+   at System.Threading.ExecutionContext.RunFromThreadPoolDispatchLoop(Thread threadPoolThread, ExecutionContext executionContext, ContextCallback callback, Object state)
+   at System.Threading.Tasks.Task.ExecuteWithThreadLocal(Task& currentTaskSlot, Thread threadPoolThread)
+--- End of stack trace from previous location ---
+   at OperateExcel.Job.ExcelImportJob.RunAsync() in E:\OperateExcelJob-main\OperateExcel.Job\ExcelImportJob.cs:line 219
+   at Program.<Main>$(String[] args) in E:\OperateExcelJob-main\OperateExcel.Job\Program.cs:line 58
+   at Program.<Main>(String[] args)    private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>> SheetHeaderAliases =
+        new Dictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>>(StringComparer.OrdinalIgnoreCase)
         {
-            [AdvertisingSheetName] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            [AdvertisingSheetName] = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
             {
-                ["\u70b9\u51fb\u7387(CTR)"] = "\u70b9\u51fb\u7387 (CTR)",
-                ["\u6bcf\u6b21\u70b9\u51fb\u6210\u672c(CPC)"] = "\u5355\u6b21\u70b9\u51fb\u6210\u672c (CPC)"
+                ["\u5f00\u59cb\u65e5\u671f"] = ["\u958b\u59cb\u65e5\u671f"],
+                ["\u7ed3\u675f\u65e5\u671f"] = ["\u7d50\u675f\u65e5\u671f"],
+                ["\u5e7f\u544a\u7ec4\u5408\u540d\u79f0"] = ["\u6d3b\u52d5\u7d44\u5408 ID"],
+                ["\u8d27\u5e01"] = ["\u8ca8\u5e63"],
+                ["\u5e7f\u544a\u6d3b\u52a8\u540d\u79f0"] = ["\u5ee3\u544a\u6d3b\u52d5\u540d\u7a31"],
+                ["\u5e7f\u544a\u7ec4\u540d\u79f0"] = ["\u5ee3\u544a\u7fa4\u7d44\u540d\u7a31"],
+                ["\u5e7f\u544aSKU"] = ["\u5ee3\u544a SKU"],
+                ["\u5e7f\u544aASIN"] = ["\u5ee3\u544a ASIN"],
+                ["\u5c55\u793a\u91cf"] = ["\u5ee3\u544a\u66dd\u5149"],
+                ["\u70b9\u51fb\u91cf"] = ["\u9ede\u64ca\u91cf"],
+                ["\u70b9\u51fb\u7387(CTR)"] = ["\u70b9\u51fb\u7387 (CTR)", "\u9ede\u64ca\u7387 (CTR)"],
+                ["\u6bcf\u6b21\u70b9\u51fb\u6210\u672c(CPC)"] = ["\u5355\u6b21\u70b9\u51fb\u6210\u672c (CPC)", "\u6bcf\u6b21\u9ede\u64ca\u8cbb\u7528 (CPC)"],
+                ["\u82b1\u8d39"] = ["\u652f\u51fa"]
             }
         };
 
@@ -303,9 +327,7 @@ public sealed class ExcelImportJob
                     {
                         Header = header,
                         TargetColumnIndex = columnIndex,
-                        SourceColumnIndex = sourceIndex.TryGetValue(ResolveSourceHeader(sheetName, header), out var sourceColumnIndex)
-                            ? sourceColumnIndex
-                            : -1
+                        SourceColumnIndex = ResolveSourceColumnIndex(sheetName, header, sourceIndex)
                     })
                     .Where(column => column.Header.Length > 0 && column.SourceColumnIndex >= 0)
                     .ToList();
@@ -2757,12 +2779,31 @@ public sealed class ExcelImportJob
             .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
     }
 
-    private static string ResolveSourceHeader(string sheetName, string targetHeader)
+    private static int ResolveSourceColumnIndex(
+        string sheetName,
+        string targetHeader,
+        IReadOnlyDictionary<string, int> sourceIndex)
     {
-        return SheetHeaderAliases.TryGetValue(sheetName, out var aliases)
-            && aliases.TryGetValue(targetHeader, out var sourceHeader)
-                ? sourceHeader
-                : targetHeader;
+        if (sourceIndex.TryGetValue(targetHeader, out var exactColumnIndex))
+        {
+            return exactColumnIndex;
+        }
+
+        if (!SheetHeaderAliases.TryGetValue(sheetName, out var aliases)
+            || !aliases.TryGetValue(targetHeader, out var sourceHeaders))
+        {
+            return -1;
+        }
+
+        foreach (var sourceHeader in sourceHeaders)
+        {
+            if (sourceIndex.TryGetValue(sourceHeader, out var aliasColumnIndex))
+            {
+                return aliasColumnIndex;
+            }
+        }
+
+        return -1;
     }
 
     private string ResolveAccountName(string storeName)

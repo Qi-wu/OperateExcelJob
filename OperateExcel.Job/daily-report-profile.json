@@ -18,10 +18,6 @@
         "PaymentMonthlyBudget": 0
       },
       {
-        "Name": "许梓渝",
-        "PaymentMonthlyBudget": 0
-      },
-      {
         "Name": "谭熹杰",
         "PaymentMonthlyBudget": 221994
       },
@@ -46,7 +42,6 @@
           "丁芳芳",
           "欧阳博文",
           "其他",
-          "许梓渝",
           "谭熹杰"
         ],
         "SourceDirectoryNames": [
@@ -60,7 +55,6 @@
       {
         "Name": "OYU",
         "People": [
-          "许梓渝",
           "谭熹杰",
           "李小婉"
         ],
@@ -97,7 +91,6 @@
         "People": [
           "丁芳芳",
           "欧阳博文",
-          "许梓渝",
           "谭熹杰",
           "唐璇淑"
         ],
@@ -163,20 +156,12 @@
         "Name": "谭熹杰"
       },
       {
-        "OwnerCode": "许梓渝",
-        "Name": "许梓渝"
-      },
-      {
         "OwnerCode": "CY",
         "Name": "莫美玉"
       },
       {
         "OwnerCode": "818",
         "Name": "其他"
-      },
-      {
-        "OwnerCode": "XZY",
-        "Name": "许梓渝"
       },
       {
         "OwnerCode": "809",
