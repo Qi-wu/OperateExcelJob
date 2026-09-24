@@ -9,7 +9,7 @@ using System.Xml.Linq;
 
 namespace OperateExcel.Job;
 
-public sealed class ExcelImportJob
+public sealed partial class ExcelImportJob
 {
     private const string AdvertisingSheetName = "\u5e7f\u544a";
     private const string FulfillmentSheetName = "fulfillment";
@@ -148,20 +148,7 @@ public sealed class ExcelImportJob
         "\u5ba1\u6279\u91d1\u989d"
     ];
 
-D:\publish\OperateExcelJob(SenYou)>.\OperateExcel.Job.exe --run-once --date=2026-08-15
-Unhandled exception. System.IO.FileNotFoundException: Template file not found.
-File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
-   at OperateExcel.Job.ExcelImportJob.CreateReportBaseFile(String outputFilePath, DateOnly processingDate, ICollection`1 messages) in E:\OperateExcelJob-main\OperateExcel.Job\ExcelImportJob.cs:line 416
-   at OperateExcel.Job.ExcelImportJob.Run() in E:\OperateExcelJob-main\OperateExcel.Job\ExcelImportJob.cs:line 239
-   at System.Threading.Tasks.Task`1.InnerInvoke()
-   at System.Threading.ExecutionContext.RunFromThreadPoolDispatchLoop(Thread threadPoolThread, ExecutionContext executionContext, ContextCallback callback, Object state)
---- End of stack trace from previous location ---
-   at System.Threading.ExecutionContext.RunFromThreadPoolDispatchLoop(Thread threadPoolThread, ExecutionContext executionContext, ContextCallback callback, Object state)
-   at System.Threading.Tasks.Task.ExecuteWithThreadLocal(Task& currentTaskSlot, Thread threadPoolThread)
---- End of stack trace from previous location ---
-   at OperateExcel.Job.ExcelImportJob.RunAsync() in E:\OperateExcelJob-main\OperateExcel.Job\ExcelImportJob.cs:line 219
-   at Program.<Main>$(String[] args) in E:\OperateExcelJob-main\OperateExcel.Job\Program.cs:line 58
-   at Program.<Main>(String[] args)    private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>> SheetHeaderAliases =
+    private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>> SheetHeaderAliases =
         new Dictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>>(StringComparer.OrdinalIgnoreCase)
         {
             [AdvertisingSheetName] = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
@@ -264,6 +251,8 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
         }
         var formatter = new DataFormatter();
         var cellStyleCache = new CellStyleCache(workbook);
+
+        EnsureAppendOnlySummaryDate(workbook, processingDate, formatter);
 
         // Shared reference sheets must be refreshed before importing transactional rows and calculating summaries.
         ImportB2BOlFromLocalFile(workbook, sourceDirectory, formatter, cellStyleCache, messages);
@@ -374,6 +363,8 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
 
                 messages.Add($"Imported {sourceTable.Rows.Count} rows from {sourceFile} to sheet {sheetName}.");
             }
+
+            TrimImportedSheetTail(targetSheet, targetHeaderRowIndex, nextTargetRowIndex);
         }
 
         // Refund rows are appended to a separate RMA workbook only when today's payment data actually contains refunds.
@@ -613,6 +604,10 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
         CellStyleCache cellStyleCache,
         ICollection<string> messages)
     {
+        EnsureAppendOnlySummaryDate(workbook, processingDate, formatter);
+        PrepareDailyTemplateLayout(workbook, formatter, messages);
+        RestoreSummaryDateFormats(workbook, cellStyleCache);
+
         // These rules are run after all raw data is imported so they can rely on refreshed mapping and source sheets.
         var waitingOrderIds = ReadWaitingOrderIds(processingDate, formatter);
         var highlightedOrderIds = HighlightWaitingFulfillmentOrders(workbook, waitingOrderIds, formatter, cellStyleCache);
@@ -869,10 +864,16 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
 
             var orderCell = sourceRow.GetCell(orderColumnIndex);
             var orderStatus = formatter.FormatCellValue(sourceRow.GetCell(statusColumnIndex));
-            if (IsCellFontRed(workbook, orderCell)
+            if (string.IsNullOrWhiteSpace(formatter.FormatCellValue(orderCell))
+                || IsCellFontRed(workbook, orderCell)
                 || orderStatus.Contains("cancelled", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
+            }
+
+            if (nextTargetRowIndex >= FulfillmentSummaryStartRowIndex)
+            {
+                throw new InvalidOperationException($"Too many detail rows for {targetSheet.SheetName}; refusing to overwrite its summary area.");
             }
 
             var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
@@ -937,6 +938,11 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
             if (!string.Equals(type.Trim(), "order", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
+            }
+
+            if (nextTargetRowIndex >= PaymentStoreSummaryStartRowIndex)
+            {
+                throw new InvalidOperationException($"Too many detail rows for {targetSheet.SheetName}; refusing to overwrite its summary area.");
             }
 
             var targetRow = targetSheet.GetRow(nextTargetRowIndex) ?? targetSheet.CreateRow(nextTargetRowIndex);
@@ -1455,6 +1461,7 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
 
     private static void SetStoreSummaryFormulas(IRow row, int startColumnIndex, int headerRowIndex, string storeName)
     {
+        var paymentColumns = ReadPaymentSummaryColumns(row.Sheet.Workbook);
         var rowNumber = row.RowNum + 1;
         var personRef = CellReference(startColumnIndex, rowNumber);
         var refundHeaderRef = CellReference(startColumnIndex + 7, headerRowIndex + 1);
@@ -1465,13 +1472,14 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
         SetFormulaCell(row, startColumnIndex + 3, $"SUMIFS(K:K,A:A,{personRef},O:O,{storeCriterion})");
         SetFormulaCell(row, startColumnIndex + 4, $"SUMIFS('\u5e7f\u544a'!M:M,'\u5e7f\u544a'!N:N,{personRef},'\u5e7f\u544a'!P:P,{storeCriterion})");
         SetFormulaCell(row, startColumnIndex + 5, $"{CellReference(startColumnIndex + 3, rowNumber)}-{CellReference(startColumnIndex + 4, rowNumber)}");
-        SetFormulaCell(row, startColumnIndex + 6, $"SUMIFS('\u6a21\u677fP'!L:L,'\u6a21\u677fP'!A:A,{personRef},'\u6a21\u677fP'!N:N,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 6, $"SUMIFS('\u6a21\u677fP'!{paymentColumns.Sales},'\u6a21\u677fP'!{paymentColumns.Owner},{personRef},'\u6a21\u677fP'!{paymentColumns.Account},{storeCriterion})");
         SetFormulaCell(row, startColumnIndex + 7, $"SUMIFS(payments!AC:AC,payments!C:C,{refundHeaderRef},payments!AE:AE,{personRef},payments!AG:AG,{storeCriterion})");
-        SetFormulaCell(row, startColumnIndex + 8, $"SUMIFS('\u6a21\u677fP'!J:J,'\u6a21\u677fP'!A:A,{personRef},'\u6a21\u677fP'!N:N,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 8, $"SUMIFS('\u6a21\u677fP'!{paymentColumns.Profit},'\u6a21\u677fP'!{paymentColumns.Owner},{personRef},'\u6a21\u677fP'!{paymentColumns.Account},{storeCriterion})");
     }
 
     private static void SetAllStoreSummaryFormulas(IRow row, int startColumnIndex, int headerRowIndex)
     {
+        var paymentColumns = ReadPaymentSummaryColumns(row.Sheet.Workbook);
         var rowNumber = row.RowNum + 1;
         var personRef = CellReference(startColumnIndex, rowNumber);
         var refundHeaderRef = CellReference(startColumnIndex + 7, headerRowIndex + 1);
@@ -1481,9 +1489,9 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
         SetFormulaCell(row, startColumnIndex + 3, $"SUMIFS(K:K,A:A,{personRef})");
         SetFormulaCell(row, startColumnIndex + 4, $"SUMIFS('\u5e7f\u544a'!M:M,'\u5e7f\u544a'!N:N,{personRef})");
         SetFormulaCell(row, startColumnIndex + 5, $"{CellReference(startColumnIndex + 3, rowNumber)}-{CellReference(startColumnIndex + 4, rowNumber)}");
-        SetFormulaCell(row, startColumnIndex + 6, $"SUMIFS('\u6a21\u677fP'!L:L,'\u6a21\u677fP'!A:A,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 6, $"SUMIFS('\u6a21\u677fP'!{paymentColumns.Sales},'\u6a21\u677fP'!{paymentColumns.Owner},{personRef})");
         SetFormulaCell(row, startColumnIndex + 7, $"SUMIFS(payments!AC:AC,payments!C:C,{refundHeaderRef},payments!AE:AE,{personRef})");
-        SetFormulaCell(row, startColumnIndex + 8, $"SUMIFS('\u6a21\u677fP'!J:J,'\u6a21\u677fP'!A:A,{personRef})");
+        SetFormulaCell(row, startColumnIndex + 8, $"SUMIFS('\u6a21\u677fP'!{paymentColumns.Profit},'\u6a21\u677fP'!{paymentColumns.Owner},{personRef})");
     }
 
     private static void SetSumFormulas(IRow row, int startColumnIndex, int firstRowIndex, int lastRowIndex)
@@ -1510,6 +1518,13 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
 
     private static void ClearGeneratedFulfillmentSummaryArea(ISheet sheet)
     {
+        // Old title merges can land on person rows when the regenerated block moves.
+        RemoveOverlappingMergedRegions(sheet, new NPOI.SS.Util.CellRangeAddress(
+            FulfillmentSummaryStartRowIndex,
+            Math.Max(FulfillmentSummaryStartRowIndex, sheet.LastRowNum),
+            FulfillmentSummaryStartColumnIndex,
+            FulfillmentSummaryStartColumnIndex + FulfillmentSummaryColumnCount - 1));
+
         for (var rowIndex = FulfillmentSummaryStartRowIndex; rowIndex <= sheet.LastRowNum; rowIndex++)
         {
             var row = sheet.GetRow(rowIndex);
@@ -1600,13 +1615,14 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
 
     private static void SetPaymentStoreSummaryFormulas(IRow row, int startColumnIndex, string storeName)
     {
+        var paymentColumns = ReadPaymentSummaryColumns(row.Sheet.Workbook);
         var rowNumber = row.RowNum + 1;
         var personRef = CellReference(startColumnIndex, rowNumber);
         var storeCriterion = QuoteExcelString(storeName);
 
-        SetFormulaCell(row, startColumnIndex + 1, $"SUMIFS(L:L,A:A,{personRef},N:N,{storeCriterion})");
-        SetFormulaCell(row, startColumnIndex + 2, $"SUMIFS(D:D,A:A,{personRef},N:N,{storeCriterion})");
-        SetFormulaCell(row, startColumnIndex + 3, $"SUMIFS(J:J,A:A,{personRef},N:N,{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 1, $"SUMIFS({paymentColumns.Sales},{paymentColumns.Owner},{personRef},{paymentColumns.Account},{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 2, $"SUMIFS({paymentColumns.Quantity},{paymentColumns.Owner},{personRef},{paymentColumns.Account},{storeCriterion})");
+        SetFormulaCell(row, startColumnIndex + 3, $"SUMIFS({paymentColumns.Profit},{paymentColumns.Owner},{personRef},{paymentColumns.Account},{storeCriterion})");
         SetFormulaCell(row, startColumnIndex + 4, $"SUMIFS('\u5e7f\u544a'!M:M,'\u5e7f\u544a'!N:N,{personRef},'\u5e7f\u544a'!P:P,{storeCriterion})");
     }
 
@@ -1756,6 +1772,13 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
 
     private static void ClearGeneratedPaymentSummaryArea(ISheet sheet)
     {
+        // Old title merges can land on person rows when the regenerated block moves.
+        RemoveOverlappingMergedRegions(sheet, new NPOI.SS.Util.CellRangeAddress(
+            PaymentStoreSummaryStartRowIndex,
+            Math.Max(PaymentStoreSummaryStartRowIndex, sheet.LastRowNum),
+            PaymentStoreSummaryStartColumnIndex,
+            PaymentStoreSummaryStartColumnIndex + PaymentStoreSummaryColumnCount - 1));
+
         for (var rowIndex = PaymentStoreSummaryStartRowIndex; rowIndex <= sheet.LastRowNum; rowIndex++)
         {
             var row = sheet.GetRow(rowIndex);
@@ -1971,7 +1994,7 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
             var salesTotal = ReadNumericCell(row.GetCell(itemPriceColumnIndex), formatter)
                 + ReadNumericCell(row.GetCell(shippingPriceColumnIndex), formatter);
             var procurement = b2bCosts.TryGetValue(mapping.ItemCode, out var unitCost) ? unitCost * quantity : 0D;
-            var premium = CalculatePremium(salesTotal, procurement, salesTotal * 0.05D);
+            var premium = CalculatePremium(salesTotal, procurement);
 
             var metrics = metricsByPerson[owner];
             metricsByPerson[owner] = metrics with
@@ -2074,7 +2097,7 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
                 metricsByPerson[owner] = metrics with
                 {
                     Payments = metrics.Payments + salesTotal,
-                    PaymentPremium = metrics.PaymentPremium + CalculatePremium(salesTotal, procurement, 0D)
+                    PaymentPremium = metrics.PaymentPremium + CalculatePremium(salesTotal, procurement)
                 };
             }
             else if (string.Equals(type, "refund", StringComparison.OrdinalIgnoreCase))
@@ -2138,7 +2161,7 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
             var salesTotal = ReadNumericCell(row.GetCell(itemPriceColumnIndex), formatter)
                 + ReadNumericCell(row.GetCell(shippingPriceColumnIndex), formatter);
             var procurement = b2bCosts.TryGetValue(mapping.ItemCode, out var unitCost) ? unitCost * quantity : 0D;
-            var premium = CalculatePremium(salesTotal, procurement, salesTotal * 0.05D);
+            var premium = CalculatePremium(salesTotal, procurement);
 
             var metrics = metricsByPerson[owner];
             metricsByPerson[owner] = metrics with
@@ -2254,7 +2277,7 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
                 metricsByPerson[owner] = metrics with
                 {
                     Payments = metrics.Payments + salesTotal,
-                    PaymentPremium = metrics.PaymentPremium + CalculatePremium(salesTotal, procurement, 0D)
+                    PaymentPremium = metrics.PaymentPremium + CalculatePremium(salesTotal, procurement)
                 };
             }
             else if (string.Equals(type, "refund", StringComparison.OrdinalIgnoreCase))
@@ -2320,7 +2343,7 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
             .ToArray());
     }
 
-    private static double CalculatePremium(double salesTotal, double procurement, double fixedFee)
+    private static double CalculatePremium(double salesTotal, double procurement)
     {
         // No procurement cost means the row cannot produce a trusted premium, so the metric is intentionally ignored.
         if (procurement == 0)
@@ -2329,12 +2352,12 @@ File name: 'D:\code\OperateExcelTemp\Temp.xlsx'
         }
         else
         {
-            // Business income is discounted by the 200 threshold before subtracting procurement and source-specific fees.
+            // Business income is discounted by the 200 threshold before subtracting procurement and procurement-based fixed fees.
             var orderIncome = salesTotal > 200D
             ? (salesTotal - 200D) * 0.9D + 200D * 0.85D
             : salesTotal * 0.85D;
 
-            return orderIncome - procurement - fixedFee;
+            return orderIncome - procurement - procurement * ProcurementFixedFeeRate;
         }
     }
 
