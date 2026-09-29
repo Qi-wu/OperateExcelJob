@@ -193,6 +193,7 @@ public sealed partial class ExcelImportJob
     private DailyReportProfile _profile;
     private IReadOnlyList<string> StoreReadOrder => _profile.SourceDirectoryReadOrder;
     private IReadOnlyList<string> FulfillmentSummaryPeople => _profile.People;
+    private IReadOnlyList<string> SummaryPeople => _profile.SummaryPeople;
     private IReadOnlyList<string> FulfillmentSummaryStores => _profile.Stores;
     private IReadOnlyDictionary<string, double> PaymentMonthlyBudgetByPerson => _profile.PaymentMonthlyBudgetByPerson;
     private IEnumerable<MappingSourceSheet> MappingSourceSheets => FulfillmentSummaryStores
@@ -1055,8 +1056,8 @@ public sealed partial class ExcelImportJob
     private IReadOnlyList<string> ResolveStorePeople(string storeName)
     {
         return _profile.StorePeople.TryGetValue(storeName, out var people)
-            ? people
-            : FulfillmentSummaryPeople;
+            ? people.Where(person => SummaryPeople.Contains(person, StringComparer.OrdinalIgnoreCase)).ToArray()
+            : SummaryPeople;
     }
 
     private void UpsertSkuOwnerSheet(IWorkbook workbook, CellStyleCache cellStyleCache)
@@ -1112,7 +1113,7 @@ public sealed partial class ExcelImportJob
         var nextRowIndex = 1;
         foreach (var store in FulfillmentSummaryStores)
         {
-            foreach (var person in ResolveStorePeople(store))
+            foreach (var person in _profile.StorePeople[store])
             {
                 var row = sheet.GetRow(nextRowIndex) ?? sheet.CreateRow(nextRowIndex);
                 SetCellValue(row.CreateCell(0), store, cellStyleCache);
@@ -1134,6 +1135,11 @@ public sealed partial class ExcelImportJob
         foreach (var store in FulfillmentSummaryStores)
         {
             var storePeople = ResolveStorePeople(store);
+            if (storePeople.Count == 0)
+            {
+                continue;
+            }
+
             var targetSheet = FindSheet(workbook, store) ?? workbook.CreateSheet(store);
             EnsureStoreDailySummaryHeaders(targetSheet, cellStyleCache);
             FreezeHeaderRow(targetSheet);
@@ -1501,7 +1507,9 @@ public sealed partial class ExcelImportJob
         for (var columnIndex = startColumnIndex + 1; columnIndex < startColumnIndex + FulfillmentSummaryColumnCount; columnIndex++)
         {
             var columnName = ColumnIndexToName(columnIndex);
-            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+            SetFormulaCell(row, columnIndex, firstRowIndex > lastRowIndex
+                ? "0"
+                : $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
         }
     }
 
@@ -1512,7 +1520,9 @@ public sealed partial class ExcelImportJob
         for (var columnIndex = startColumnIndex; columnIndex < startColumnIndex + columnCount; columnIndex++)
         {
             var columnName = ColumnIndexToName(columnIndex);
-            SetFormulaCell(row, columnIndex, $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
+            SetFormulaCell(row, columnIndex, firstRowIndex > lastRowIndex
+                ? "0"
+                : $"SUM({columnName}{firstRowNumber}:{columnName}{lastRowNumber})");
         }
     }
 
@@ -1593,17 +1603,17 @@ public sealed partial class ExcelImportJob
         }
 
         var firstPersonRowIndex = headerRowIndex + 1;
-        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        for (var i = 0; i < SummaryPeople.Count; i++)
         {
             var rowIndex = firstPersonRowIndex + i;
             var row = sheet.GetRow(rowIndex) ?? sheet.CreateRow(rowIndex);
             CopyRowStyle(personStyleRow, row, 3, startColumnIndex, PaymentStoreSummaryColumnCount);
             ApplyGeneratedSummaryStyle(sheet, row, startColumnIndex, PaymentStoreSummaryColumnCount, GeneratedSummaryRowKind.Person, GeneratedSummaryBlockKind.PaymentStore);
-            SetStringCell(row, startColumnIndex, FulfillmentSummaryPeople[i]);
+            SetStringCell(row, startColumnIndex, SummaryPeople[i]);
             SetPaymentStoreSummaryFormulas(row, startColumnIndex, storeName);
         }
 
-        var totalRowIndex = firstPersonRowIndex + FulfillmentSummaryPeople.Count;
+        var totalRowIndex = firstPersonRowIndex + SummaryPeople.Count;
         var totalRow = sheet.GetRow(totalRowIndex) ?? sheet.CreateRow(totalRowIndex);
         CopyRowStyle(totalStyleRow, totalRow, 3, startColumnIndex, PaymentStoreSummaryColumnCount);
         ApplyGeneratedSummaryStyle(sheet, totalRow, startColumnIndex, PaymentStoreSummaryColumnCount, GeneratedSummaryRowKind.Total, GeneratedSummaryBlockKind.PaymentStore);
@@ -1807,6 +1817,11 @@ public sealed partial class ExcelImportJob
         DataFormatter formatter,
         CellStyleCache cellStyleCache)
     {
+        if (SummaryPeople.Count == 0)
+        {
+            return 0;
+        }
+
         // The main summary sheet receives one daily row per operator plus a second formula block with totals.
         var summarySheet = workbook.GetSheet(SummarySheetName)
             ?? throw new InvalidOperationException($"Sheet not found: {SummarySheetName}");
@@ -1830,7 +1845,7 @@ public sealed partial class ExcelImportJob
             cellStyleCache);
         ApplySummarySheetCenterAlignment(summarySheet, cellStyleCache);
 
-        return FulfillmentSummaryPeople.Count + FulfillmentSummaryPeople.Count + 1;
+        return SummaryPeople.Count + SummaryPeople.Count + 1;
     }
 
     private IReadOnlyDictionary<string, DailySummaryMetrics> BuildDailySummaryMetrics(
@@ -1838,7 +1853,7 @@ public sealed partial class ExcelImportJob
         DataFormatter formatter)
     {
         // Person-level metrics merge fulfillment, advertising, and payment data through the SKU ownership mapping.
-        var metricsByPerson = FulfillmentSummaryPeople.ToDictionary(
+        var metricsByPerson = SummaryPeople.ToDictionary(
             person => person,
             _ => new DailySummaryMetrics(),
             StringComparer.OrdinalIgnoreCase);
@@ -2391,9 +2406,9 @@ public sealed partial class ExcelImportJob
             PaymentFirstDailySummaryStartColumnIndex,
             PaymentFirstDailySummaryColumnCount);
 
-        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        for (var i = 0; i < SummaryPeople.Count; i++)
         {
-            var personName = FulfillmentSummaryPeople[i];
+            var personName = SummaryPeople[i];
             var targetRowIndex = startRowIndex + i;
             var targetRow = summarySheet.GetRow(targetRowIndex) ?? summarySheet.CreateRow(targetRowIndex);
             CopyRowStyle(styleRow, targetRow, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryStartColumnIndex, PaymentFirstDailySummaryColumnCount);
@@ -2447,9 +2462,9 @@ public sealed partial class ExcelImportJob
             ?? summarySheet.GetRow(0);
         var lastTotalRowIndex = TryFindLastTotalRowIndex(summarySheet, PaymentSecondDailySummaryStartColumnIndex);
 
-        for (var i = 0; i < FulfillmentSummaryPeople.Count; i++)
+        for (var i = 0; i < SummaryPeople.Count; i++)
         {
-            var personName = FulfillmentSummaryPeople[i];
+            var personName = SummaryPeople[i];
             var targetRowIndex = startRowIndex + i;
             var targetRow = summarySheet.GetRow(targetRowIndex) ?? summarySheet.CreateRow(targetRowIndex);
             CopyRowStyle(templatePersonRow, targetRow, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryStartColumnIndex, PaymentSecondDailySummaryColumnCount);
@@ -2459,7 +2474,7 @@ public sealed partial class ExcelImportJob
             ApplySecondDailySummaryDetailStyle(targetRow, cellStyleCache);
         }
 
-        var totalRowIndex = startRowIndex + FulfillmentSummaryPeople.Count;
+        var totalRowIndex = startRowIndex + SummaryPeople.Count;
         var totalRow = summarySheet.GetRow(totalRowIndex) ?? summarySheet.CreateRow(totalRowIndex);
         var templateTotalRow = lastTotalRowIndex >= 0
             ? summarySheet.GetRow(lastTotalRowIndex) ?? templatePersonRow

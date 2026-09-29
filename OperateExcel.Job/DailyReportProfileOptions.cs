@@ -11,6 +11,7 @@ public sealed class DailyReportPersonOptions
 {
     public string? Name { get; set; }
     public double PaymentMonthlyBudget { get; set; }
+    public bool OnlyInFulfillmentSummary { get; set; }
 }
 
 public sealed class DailyReportStoreOptions
@@ -32,6 +33,7 @@ internal sealed class DailyReportProfile
 {
     private DailyReportProfile(
         IReadOnlyList<string> people,
+        IReadOnlyList<string> summaryPeople,
         IReadOnlyList<string> stores,
         IReadOnlyDictionary<string, double> paymentMonthlyBudgetByPerson,
         IReadOnlyDictionary<string, IReadOnlyList<string>> storePeople,
@@ -42,6 +44,7 @@ internal sealed class DailyReportProfile
         IReadOnlyDictionary<string, string> skuOwnerNamesByCode)
     {
         People = people;
+        SummaryPeople = summaryPeople;
         Stores = stores;
         PaymentMonthlyBudgetByPerson = paymentMonthlyBudgetByPerson;
         StorePeople = storePeople;
@@ -53,6 +56,7 @@ internal sealed class DailyReportProfile
     }
 
     public IReadOnlyList<string> People { get; }
+    public IReadOnlyList<string> SummaryPeople { get; }
     public IReadOnlyList<string> Stores { get; }
     public IReadOnlyDictionary<string, double> PaymentMonthlyBudgetByPerson { get; }
     public IReadOnlyDictionary<string, IReadOnlyList<string>> StorePeople { get; }
@@ -65,6 +69,7 @@ internal sealed class DailyReportProfile
     public static DailyReportProfile FromOptions(DailyReportProfileOptions options)
     {
         var people = new List<string>();
+        var summaryPeople = new List<string>();
         var peopleSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var paymentMonthlyBudgetByPerson = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
@@ -77,6 +82,10 @@ internal sealed class DailyReportProfile
             }
 
             people.Add(personName);
+            if (!person.OnlyInFulfillmentSummary)
+            {
+                summaryPeople.Add(personName);
+            }
             paymentMonthlyBudgetByPerson[personName] = person.PaymentMonthlyBudget;
         }
 
@@ -186,6 +195,7 @@ internal sealed class DailyReportProfile
 
         return new DailyReportProfile(
             people,
+            summaryPeople,
             stores,
             paymentMonthlyBudgetByPerson,
             storePeople,

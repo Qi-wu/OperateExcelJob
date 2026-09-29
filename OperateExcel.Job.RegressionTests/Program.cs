@@ -171,6 +171,78 @@ void CheckGeneratedMerges(IWorkbook workbook)
     }
 }
 
+// Visibility applies to generated summaries, never to ownership or source data.
+foreach (var mode in new[] { "default", "mixed", "all-hidden" })
+{
+    var scopedProfile = new DailyReportProfileOptions
+    {
+        People = [
+            new() { Name = "Visible", OnlyInFulfillmentSummary = mode == "all-hidden" },
+            new() { Name = "Hidden", OnlyInFulfillmentSummary = mode != "default" }],
+        Stores = [
+            new() { Name = "Explicit", People = ["Visible", "Hidden"], MappingSheetNameCandidates = ["Map1"] },
+            new() { Name = "Implicit", MappingSheetNameCandidates = ["Map2"] }],
+        SkuOwners = [new() { OwnerCode = "V", Name = "Visible" }, new() { OwnerCode = "H", Name = "Hidden" }]
+    };
+    var scopedJob = NewJob(scopedProfile);
+    var expected = mode == "default" ? new[] { "Visible", "Hidden" }
+        : mode == "mixed" ? new[] { "Visible" } : Array.Empty<string>();
+    foreach (var store in new[] { "Explicit", "Implicit", "Unknown" })
+        Check(((IReadOnlyList<string>)Call("ResolveStorePeople", scopedJob, store)!).SequenceEqual(expected),
+            $"{mode}: store scope/order {store}");
+
+    using var workbook = Fixture(false);
+    var styles = Styles(workbook);
+    var summary = Call("GenerateFulfillmentSummaryTemplates", scopedJob, workbook)!;
+    Call("GeneratePaymentSummaryTemplates", scopedJob, workbook);
+    var f = workbook.GetSheet("模版F");
+    var allFirst = (int)summary.GetType().GetProperty("AllStoreFirstPersonRowIndex")!.GetValue(summary)!;
+    Check(f.GetRow(allFirst).GetCell(2).StringCellValue == "Visible"
+        && f.GetRow(allFirst + 1).GetCell(2).StringCellValue == "Hidden", $"{mode}: all-store people lost");
+    Check(f.GetRow(allFirst + 1).GetCell(3).CellFormula.Contains("SUMIFS(D:D,A:A,"),
+        "All-store metrics must use source detail, not filtered store totals");
+    foreach (var (sheet, firstRow, endRow) in new[] {
+        (f, 1334, allFirst - 2), (workbook.GetSheet("模板P"), 1500, workbook.GetSheet("模板P").LastRowNum + 1) })
+    {
+        var names = Enumerable.Range(firstRow, endRow - firstRow)
+            .Select(i => sheet.GetRow(i)?.GetCell(2)?.ToString()).ToArray();
+        Check(names.Count(n => n == "Hidden") == (mode == "default" ? 2 : 0), $"{mode}: hidden store row");
+        if (mode == "all-hidden")
+            foreach (var i in Enumerable.Range(firstRow, endRow - firstRow))
+                if (sheet.GetRow(i)?.GetCell(2)?.ToString() == "合计")
+                    Check(sheet.GetRow(i).GetCell(3).CellFormula == "0", "Empty total is circular");
+    }
+    Call("UpsertSkuOwnerSheet", scopedJob, workbook, styles);
+    Call("UpsertStorePersonRelationSheet", scopedJob, workbook, styles);
+    Check(workbook.GetSheet("sku归属").GetRow(2).GetCell(1).StringCellValue == "Hidden", "Owner mapping lost");
+    Check(workbook.GetSheet("店铺人员关系").LastRowNum == 4, "Store relationship lost");
+
+    var daily = workbook.CreateSheet("汇总");
+    var headers = new[] { "日期", "姓名", "订单", "销售总额", "溢价", "广告花费", "最终溢价", "payments", "Refund", "payment溢价" };
+    var header = daily.CreateRow(0);
+    for (var i = 0; i < headers.Length; i++) header.CreateCell(i).SetCellValue(headers[i]);
+    var metricsType = typeof(ExcelImportJob).GetNestedType("DailySummaryMetrics", BindingFlags.NonPublic)!;
+    var metrics = Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(string), metricsType))!;
+    var date = new DateOnly(2026, 9, 29);
+    if (expected.Length > 0)
+    {
+        Call("AppendFirstDailySummaryRows", scopedJob, daily, date, 1, metrics, styles);
+        Call("AppendSecondDailySummaryRows", scopedJob, daily, date, 1, formatter, styles);
+        for (var i = 0; i < expected.Length; i++)
+        {
+            Check(daily.GetRow(i + 1).GetCell(1).StringCellValue == expected[i], "First daily scope/order");
+            Check(daily.GetRow(i + 1).GetCell(15).StringCellValue == expected[i], "Second daily scope/order");
+        }
+        Check(daily.GetRow(expected.Length + 1).GetCell(1) is null, "Unexpected extra daily person");
+    }
+    else
+    {
+        Check((int)Call("AppendDailySummaryTemplates", scopedJob, workbook, date, summary, formatter, styles)! == 0,
+            "All-hidden profile should not append daily totals");
+        Check(daily.LastRowNum == 0, "All-hidden profile modified daily sheet");
+    }
+}
+
 // Optional read-only real-workbook regression. All generated files stay in an explicitly supplied output directory.
 if (args.Length > 0)
 {

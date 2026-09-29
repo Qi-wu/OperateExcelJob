@@ -3,35 +3,48 @@
     "People": [
       {
         "Name": "莫美玉",
-        "PaymentMonthlyBudget": 522425
+        "PaymentMonthlyBudget": 522425,
+        "OnlyInFulfillmentSummary":false
       },
       {
         "Name": "丁芳芳",
-        "PaymentMonthlyBudget": 428121
+        "PaymentMonthlyBudget": 428121,
+        "OnlyInFulfillmentSummary":false
       },
       {
         "Name": "欧阳博文",
-        "PaymentMonthlyBudget": 504162
+        "PaymentMonthlyBudget": 504162,
+        "OnlyInFulfillmentSummary":false
       },
       {
         "Name": "其他",
-        "PaymentMonthlyBudget": 0
+        "PaymentMonthlyBudget": 0,
+        "OnlyInFulfillmentSummary":false
       },
       {
         "Name": "谭熹杰",
-        "PaymentMonthlyBudget": 221994
+        "PaymentMonthlyBudget": 221994,
+        "OnlyInFulfillmentSummary":false
       },
       {
         "Name": "唐璇淑",
-        "PaymentMonthlyBudget": 145832
+        "PaymentMonthlyBudget": 145832,
+        "OnlyInFulfillmentSummary":false
       },
       {
         "Name": "李小婉",
-        "PaymentMonthlyBudget": 0
+        "PaymentMonthlyBudget": 0,
+        "OnlyInFulfillmentSummary":false
       },
       {
         "Name": "朱小燕",
-        "PaymentMonthlyBudget": 0
+        "PaymentMonthlyBudget": 0,
+        "OnlyInFulfillmentSummary":false
+      },
+      {
+        "Name": "609",
+        "PaymentMonthlyBudget": 0,
+        "OnlyInFulfillmentSummary":true
       }
     ],
     "Stores": [
@@ -186,6 +199,10 @@
       {
         "OwnerCode": "朱小燕",
         "Name": "朱小燕"
+      },
+      {
+        "OwnerCode": "609",
+        "Name": "609"
       }
     ]
   }

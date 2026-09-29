@@ -118,3 +118,20 @@ Runtime logs are written to daily files under the configured `FileLog:Directory`
 ```text
 C:\OperateExcelJob\logs\operate-excel-yyyyMMdd.log
 ```
+
+## 人员统计范围
+
+在 `daily-report-profile.json` 的 `DailyReportProfile.People[]` 中配置：
+
+```json
+{
+  "Name": "人员姓名",
+  "PaymentMonthlyBudget": 0,
+  "OnlyInFulfillmentSummary": true
+}
+```
+
+- `false`（默认，省略时相同）：沿用原有统计范围。
+- `true`：仅在“模版F”的“汇总总计 / 全部店铺”部分统计显示；不参与“汇总”sheet、各店铺日报、“模版F”分店铺汇总以及“模板P”店铺汇总的新增人员行和合计。
+- 原始明细、SKU 归属和店铺人员关系仍保留，以保证“模版F”统计完整。人员顺序保持配置顺序。
+- 开关对后续生成生效，不删除或改写已有历史日报。默认值为 `false`，按需将指定人员改为 `true`。
